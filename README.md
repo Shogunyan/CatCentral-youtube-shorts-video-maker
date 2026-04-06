@@ -22,10 +22,12 @@ You set it up once and it runs 3 times a day automatically (default: 9am, 2pm, 7
 
 - A computer running **Windows, Mac, or Linux**
 - **Python 3.10 or newer** installed
-- **ffmpeg** installed (free video tool the app uses behind the scenes)
+- **ffmpeg** installed (free video tool the app uses behind the scenes — Step 2 below)
 - A **YouTube channel** (your CatCentral channel)
-- A **Google account** that owns the channel (for uploading)
-- An internet connection
+- A **Google account** that owns the channel (for uploading — Step 5 below)
+- An **internet connection** — required every time the app runs (for scraping, downloading clips, generating the AI voiceover, and uploading to YouTube)
+
+> **Note on Instagram:** Adding your Instagram login is optional and gives the app one more source for finding cat videos. However, Instagram actively limits automated access — if you use it heavily, Instagram may temporarily lock your account. It's safer to use a secondary Instagram account rather than your main one.
 
 ---
 
