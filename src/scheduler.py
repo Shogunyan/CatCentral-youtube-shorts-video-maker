@@ -118,6 +118,7 @@ class Pipeline:
         downloaded = downloaded[:n]
         random.shuffle(downloaded)
         clip_paths = [p for _, p in downloaded]
+        clip_platforms = [m.get("platform", "unknown") for m, _ in downloaded]
         used_ids = [m["id"] for m, _ in downloaded]
 
         # ── 3. Caption ────────────────────────────────────────────────────────
@@ -170,6 +171,7 @@ class Pipeline:
                     title=title,
                     output_path=output_path,
                     config=self.config,
+                    clip_platforms=clip_platforms,
                     on_progress=on_video_step,
                     tts_audio=tts_audio,
                 )

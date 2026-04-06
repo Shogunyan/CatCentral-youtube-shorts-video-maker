@@ -297,29 +297,76 @@ def _add_watermark(input_path: Path, output_path: Path, watermark_text: str) -> 
 
 # ── Optional: Blur source-video watermarks ───────────────────────────────────
 
-def _blur_corner_watermarks(input_path: Path, output_path: Path) -> Path:
-    """
-    Apply a gentle Gaussian blur to all four corners of the video to reduce
-    the visibility of any platform watermarks in source clips.
-    Each corner box is 220×120 px at 1080×1920 resolution.
-    """
-    bw, bh = 220, 120  # blur region dimensions
-    blur_strength = 12  # Gaussian blur sigma
+# Per-platform blur regions as (crop_x, crop_y, width, height).
+# Coordinates use ffmpeg expressions: iw/ih = input dimensions.
+# Only the corners where that platform actually puts watermarks are blurred.
+#
+# YouTube:   yt-dlp downloads are clean — no watermark, no blur needed.
+# TikTok:    logo in bottom-right; username strip in bottom-left.
+# Instagram: yt-dlp downloads are generally clean; skip.
+# unknown:   blur all four corners as a safe fallback.
+_PLATFORM_BLUR_REGIONS: dict[str, list[tuple]] = {
+    "youtube":   [],   # clean download — skip entirely
+    "instagram": [],   # clean download — skip entirely
+    "tiktok": [
+        # bottom-right: TikTok logo (~180×180 px)
+        ("iw-180", "ih-180", 180, 180),
+        # bottom-left: username / description strip (~300×100 px)
+        ("0",      "ih-100", 300, 100),
+    ],
+    "unknown": [
+        # fallback: all four corners at a modest size
+        ("0",       "0",       180, 100),
+        ("iw-180",  "0",       180, 100),
+        ("0",       "ih-100",  180, 100),
+        ("iw-180",  "ih-100",  180, 100),
+    ],
+}
 
-    # Build a split/blur/overlay chain for 4 corners
-    # Use iw/ih (input dimensions) in crop and W/H (output dimensions) in overlay
-    # so this works correctly on raw source clips of any resolution.
-    vf = (
-        f"[0:v]split=5[base][c1][c2][c3][c4];"
-        f"[c1]crop={bw}:{bh}:0:0,gblur=sigma={blur_strength}[b1];"
-        f"[c2]crop={bw}:{bh}:iw-{bw}:0,gblur=sigma={blur_strength}[b2];"
-        f"[c3]crop={bw}:{bh}:0:ih-{bh},gblur=sigma={blur_strength}[b3];"
-        f"[c4]crop={bw}:{bh}:iw-{bw}:ih-{bh},gblur=sigma={blur_strength}[b4];"
-        f"[base][b1]overlay=0:0[o1];"
-        f"[o1][b2]overlay=W-{bw}:0[o2];"
-        f"[o2][b3]overlay=0:H-{bh}[o3];"
-        f"[o3][b4]overlay=W-{bw}:H-{bh}[out]"
-    )
+_BLUR_STRENGTH = 18  # Gaussian sigma — strong enough to be unreadable
+
+
+def _blur_source_watermarks(
+    input_path: Path,
+    output_path: Path,
+    platform: str = "unknown",
+) -> Path:
+    """
+    Blur only the screen regions where the given platform puts its watermark.
+
+    - YouTube / Instagram: copies the file untouched (no watermarks).
+    - TikTok: blurs bottom-right (logo) and bottom-left (username) only.
+    - unknown: blurs all four corners as a safe fallback.
+    """
+    regions = _PLATFORM_BLUR_REGIONS.get(platform, _PLATFORM_BLUR_REGIONS["unknown"])
+
+    if not regions:
+        # Platform is clean — no processing needed
+        shutil.copy2(input_path, output_path)
+        return output_path
+
+    n = len(regions)
+    # Build a dynamic split → blur → overlay chain for however many regions exist
+    split_labels = "".join(f"[c{i}]" for i in range(n))
+    fc_parts = [f"[0:v]split={n + 1}[base]{split_labels}"]
+
+    for i, (cx, cy, bw, bh) in enumerate(regions):
+        fc_parts.append(
+            f"[c{i}]crop={bw}:{bh}:{cx}:{cy},gblur=sigma={_BLUR_STRENGTH}[b{i}]"
+        )
+
+    # Chain overlays: base → overlay b0 → overlay b1 → … → [out]
+    prev = "base"
+    for i, (cx, cy, bw, bh) in enumerate(regions):
+        # Convert crop x/y expressions to overlay x/y
+        # iw-N → W-N  (input dims in crop → output dims in overlay)
+        ox = cx.replace("iw", "W")
+        oy = cy.replace("ih", "H")
+        nxt = "out" if i == n - 1 else f"o{i}"
+        fc_parts.append(f"[{prev}][b{i}]overlay={ox}:{oy}[{nxt}]")
+        prev = nxt
+
+    vf = ";".join(fc_parts)
 
     try:
         _ffmpeg(
@@ -335,8 +382,7 @@ def _blur_corner_watermarks(input_path: Path, output_path: Path) -> Path:
         )
         return output_path
     except Exception as e:
-        # Non-fatal: if blur fails, continue with original
-        logger.warning(f"Corner blur failed (non-fatal): {e}")
+        logger.warning(f"Watermark blur failed for {platform} (non-fatal): {e}")
         shutil.copy2(input_path, output_path)
         return output_path
 
@@ -348,7 +394,7 @@ def create_ranking_video(
     title: str,
     output_path: Path,
     config,
-    blur_source_watermarks: bool = True,
+    clip_platforms: list[str] | None = None,
     on_progress=None,
     tts_audio: dict | None = None,
 ) -> Path:
@@ -356,15 +402,18 @@ def create_ranking_video(
     Build a ranking-style Shorts video from exactly `config.clips_per_video` clips.
 
     Args:
-        clip_paths:  Local video file paths. clip_paths[0] will be ranked #5,
-                     clip_paths[-1] will be ranked #1 (randomly ordered by caller).
-        title:       Short title shown at top of every clip and on the title card.
-        output_path: Where to write the final MP4.
-        config:      Config object (for clip_duration, watermark_text, etc.).
-        blur_source_watermarks: Apply corner blur to reduce platform watermarks.
+        clip_paths:     Local video file paths. clip_paths[0] will be ranked #5,
+                        clip_paths[-1] will be ranked #1 (randomly ordered by caller).
+        title:          Short title shown at top of every clip and on the title card.
+        output_path:    Where to write the final MP4.
+        config:         Config object (for clip_duration, watermark_text, etc.).
+        clip_platforms: Platform name per clip ("youtube", "tiktok", "instagram").
+                        If omitted, all clips are treated as "unknown".
     """
     if len(clip_paths) < 2:
         raise ValueError(f"Need at least 2 clips, got {len(clip_paths)}")
+
+    platforms = clip_platforms or ["unknown"] * len(clip_paths)
 
     def _step(msg: str) -> None:
         logger.debug(msg)
@@ -383,11 +432,15 @@ def create_ranking_video(
         for idx, src in enumerate(clip_paths):
             rank = n - idx  # n=5→rank 5 first, idx=4→rank 1 last
             step1 = tmp / f"step1_rank{rank}.mp4"
+            platform = platforms[idx]
 
-            if blur_source_watermarks:
-                _step(f"Reducing watermarks on clip {idx + 1}/{n}…")
+            blur_regions = _PLATFORM_BLUR_REGIONS.get(
+                platform, _PLATFORM_BLUR_REGIONS["unknown"]
+            )
+            if blur_regions:
+                _step(f"Removing {platform} watermark on clip {idx + 1}/{n}…")
                 blurred = tmp / f"blurred_rank{rank}.mp4"
-                _blur_corner_watermarks(src, blurred)
+                _blur_source_watermarks(src, blurred, platform)
                 _step(f"Processing clip {idx + 1}/{n}  (rank #{rank})…")
                 _process_clip(blurred, step1, rank, clip_duration, title)
             else:
