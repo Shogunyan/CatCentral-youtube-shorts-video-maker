@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-main.py — CatCentral YouTube Shorts Maker CLI
+main.py — CatCentral YouTube Shorts Maker
 
 Usage:
-  python main.py setup       First-time setup wizard
-  python main.py run         Run the full pipeline once (scrape → edit → upload)
-  python main.py schedule    Start the daily scheduler (3 uploads/day)
-  python main.py test        Dry run — scrape + edit but skip upload
-  python main.py auth        Re-run YouTube OAuth flow (if token expired)
+  python main.py            Launch the interactive TUI (recommended)
+  python main.py setup      First-time setup wizard (headless)
+  python main.py run        Run the full pipeline once (headless)
+  python main.py schedule   Start the daily scheduler (headless)
+  python main.py test       Dry run — scrape + edit but skip upload
+  python main.py auth       Re-run YouTube OAuth flow (if token expired)
 """
 import logging
 import sys
@@ -39,9 +40,10 @@ BANNER = """\
 def _print_help():
     print(bold(cyan(BANNER)))
     print("  Commands:")
-    print(f"    {bold('setup')}     — First-time setup wizard (run this first)")
-    print(f"    {bold('run')}       — Run the full pipeline once now")
-    print(f"    {bold('schedule')}  — Start the daily scheduler (3 uploads/day)")
+    print(f"    {bold('(none)')}    — Launch the interactive TUI  ← recommended")
+    print(f"    {bold('setup')}     — First-time setup wizard (headless)")
+    print(f"    {bold('run')}       — Run the full pipeline once now (headless)")
+    print(f"    {bold('schedule')}  — Start the daily scheduler (headless)")
     print(f"    {bold('test')}      — Dry run: scrape + edit, no upload")
     print(f"    {bold('auth')}      — Re-authorise YouTube access")
     print()
@@ -110,7 +112,13 @@ def cmd_schedule(config):
 def main():
     args = sys.argv[1:]
 
-    if not args or args[0] in ("-h", "--help", "help"):
+    # No arguments → launch the TUI
+    if not args:
+        from tui import run as tui_run
+        tui_run()
+        return
+
+    if args[0] in ("-h", "--help", "help"):
         _print_help()
         return
 

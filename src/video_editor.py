@@ -284,6 +284,7 @@ def create_ranking_video(
     output_path: Path,
     config,
     blur_source_watermarks: bool = True,
+    on_progress=None,
 ) -> Path:
     """
     Build a ranking-style Shorts video from exactly `config.clips_per_video` clips.
@@ -299,6 +300,11 @@ def create_ranking_video(
     if len(clip_paths) < 2:
         raise ValueError(f"Need at least 2 clips, got {len(clip_paths)}")
 
+    def _step(msg: str) -> None:
+        logger.debug(msg)
+        if on_progress:
+            on_progress(msg)
+
     n = len(clip_paths)
     clip_duration = config.clip_duration
 
@@ -313,25 +319,30 @@ def create_ranking_video(
             step1 = tmp / f"step1_rank{rank}.mp4"
 
             if blur_source_watermarks:
+                _step(f"Reducing watermarks on clip {idx + 1}/{n}…")
                 blurred = tmp / f"blurred_rank{rank}.mp4"
                 _blur_corner_watermarks(src, blurred)
+                _step(f"Processing clip {idx + 1}/{n}  (rank #{rank})…")
                 _process_clip(blurred, step1, rank, clip_duration, title)
             else:
+                _step(f"Processing clip {idx + 1}/{n}  (rank #{rank})…")
                 _process_clip(src, step1, rank, clip_duration, title)
 
             processed.append(step1)
-            logger.debug(f"  Processed rank #{rank} clip")
 
         # ── 2. Title card ─────────────────────────────────────────────────────
+        _step("Creating title card…")
         title_card = tmp / "title_card.mp4"
         _make_title_card(title_card, title, duration=2)
 
         # ── 3. Concatenate: title card first, then rank 5→1 ──────────────────
+        _step("Concatenating all clips…")
         concat_in = [title_card] + processed
         joined = tmp / "joined.mp4"
         _concat_clips(concat_in, joined)
 
         # ── 4. Add moving @CatCentral watermark ──────────────────────────────
+        _step(f"Adding {config.watermark_text} watermark…")
         output_path.parent.mkdir(parents=True, exist_ok=True)
         _add_watermark(joined, output_path, config.watermark_text)
 
