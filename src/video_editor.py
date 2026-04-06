@@ -323,7 +323,7 @@ _PLATFORM_BLUR_REGIONS: dict[str, list[tuple]] = {
         ("iw-180",         "0",       180, 100),   # top-right
         ("0",              "ih-100",  180, 100),   # bottom-left
         ("iw-180",         "ih-100",  180, 100),   # bottom-right
-        ("iw//2-200",      "ih-80",   400,  80),   # center-bottom (CapCut etc.)
+        ("iw/2-200",       "ih-80",   400,  80),   # center-bottom (CapCut etc.)
     ],
 }
 

@@ -191,10 +191,6 @@ class SetupScreen(Screen):
                 instagram_password=ig_pass,
                 upload_times=times,
             )
-            # Force config reload after .env write
-            import importlib, config as cfg_mod
-            importlib.reload(cfg_mod)
-
             from config import Config
             from src.uploader import YouTubeUploader
             cfg = Config()

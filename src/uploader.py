@@ -155,7 +155,7 @@ class YouTubeUploader:
             return video_id
 
         except HttpError as e:
-            logger.error(f"YouTube API error: {e.resp.status} — {e.content.decode()}")
+            logger.error(f"YouTube API error: {e.resp.status} — {e.content.decode('utf-8', errors='replace')}")
             return None
         except Exception as e:
             logger.error(f"Upload failed: {e}")
