@@ -70,6 +70,7 @@ def setup_logging(config: Config):
     logging.basicConfig(
         level=level,
         format=fmt,
+        force=True,   # override any handlers already attached (e.g. by Textual)
         handlers=[
             logging.FileHandler(config.log_path),
             logging.StreamHandler(),

@@ -10,12 +10,10 @@ from __future__ import annotations
 
 import datetime
 import logging
-from pathlib import Path
-
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Container, Horizontal
 from textual.message import Message
 from textual.reactive import reactive
 from textual.screen import Screen
@@ -24,7 +22,6 @@ from textual.widgets import (
     Footer,
     Header,
     Input,
-    Label,
     Log,
     ProgressBar,
     Rule,

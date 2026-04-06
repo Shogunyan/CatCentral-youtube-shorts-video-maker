@@ -122,8 +122,13 @@ class Downloader:
             )
 
         elif platform == "tiktok":
-            # yt-dlp can fetch the no-watermark stream from TikTok's API
-            base["format"] = "download_addr-0/play_addr-0/best"
+            # Prefer no-watermark download URL; fall through to best quality
+            # Format IDs vary by yt-dlp version, so we chain several options
+            base["format"] = (
+                "download_addr-0/play_addr-0"
+                "/bestvideo[ext=mp4]+bestaudio[ext=m4a]"
+                "/best[ext=mp4]/best"
+            )
             base["extractor_args"] = {
                 "tiktok": {
                     "webpage_download": False,

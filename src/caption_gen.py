@@ -5,7 +5,6 @@ All generation is template-based (no LLM required).  Templates are shuffled
 so repeated uploads don't look identical.
 """
 import random
-from datetime import datetime
 
 # ── Title templates ───────────────────────────────────────────────────────────
 

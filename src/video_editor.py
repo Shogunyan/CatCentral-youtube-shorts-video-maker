@@ -9,7 +9,6 @@ Pipeline (all via ffmpeg subprocess):
   5. Encode final MP4 (H.264 / AAC, 1080×1920)
 """
 import logging
-import random
 import shutil
 import subprocess
 import tempfile
@@ -234,7 +233,8 @@ def _concat_clips(clip_paths: list[Path], output_path: Path) -> Path:
         mode="w", suffix=".txt", delete=False
     ) as f:
         for p in clip_paths:
-            f.write(f"file '{str(p)}'\n")
+            # Forward slashes required by the concat demuxer on all platforms
+            f.write(f"file '{str(p).replace(chr(92), '/')}'\n")
         list_file = Path(f.name)
 
     _ffmpeg(
@@ -307,16 +307,18 @@ def _blur_corner_watermarks(input_path: Path, output_path: Path) -> Path:
     blur_strength = 12  # Gaussian blur sigma
 
     # Build a split/blur/overlay chain for 4 corners
+    # Use iw/ih (input dimensions) in crop and W/H (output dimensions) in overlay
+    # so this works correctly on raw source clips of any resolution.
     vf = (
         f"[0:v]split=5[base][c1][c2][c3][c4];"
         f"[c1]crop={bw}:{bh}:0:0,gblur=sigma={blur_strength}[b1];"
-        f"[c2]crop={bw}:{bh}:{TARGET_W - bw}:0,gblur=sigma={blur_strength}[b2];"
-        f"[c3]crop={bw}:{bh}:0:{TARGET_H - bh},gblur=sigma={blur_strength}[b3];"
-        f"[c4]crop={bw}:{bh}:{TARGET_W - bw}:{TARGET_H - bh},gblur=sigma={blur_strength}[b4];"
+        f"[c2]crop={bw}:{bh}:iw-{bw}:0,gblur=sigma={blur_strength}[b2];"
+        f"[c3]crop={bw}:{bh}:0:ih-{bh},gblur=sigma={blur_strength}[b3];"
+        f"[c4]crop={bw}:{bh}:iw-{bw}:ih-{bh},gblur=sigma={blur_strength}[b4];"
         f"[base][b1]overlay=0:0[o1];"
-        f"[o1][b2]overlay={TARGET_W - bw}:0[o2];"
-        f"[o2][b3]overlay=0:{TARGET_H - bh}[o3];"
-        f"[o3][b4]overlay={TARGET_W - bw}:{TARGET_H - bh}[out]"
+        f"[o1][b2]overlay=W-{bw}:0[o2];"
+        f"[o2][b3]overlay=0:H-{bh}[o3];"
+        f"[o3][b4]overlay=W-{bw}:H-{bh}[out]"
     )
 
     try:
@@ -426,10 +428,11 @@ def create_ranking_video(
 # ── CLI helper ────────────────────────────────────────────────────────────────
 
 def check_ffmpeg():
-    """Raise RuntimeError if ffmpeg is not installed."""
-    if not shutil.which("ffmpeg"):
-        raise RuntimeError(
-            "ffmpeg is not installed or not on PATH.\n"
-            "Install it with:  sudo apt install ffmpeg  (Ubuntu/Debian)\n"
-            "                  brew install ffmpeg       (macOS)"
-        )
+    """Raise RuntimeError if ffmpeg or ffprobe is not installed."""
+    for tool in ("ffmpeg", "ffprobe"):
+        if not shutil.which(tool):
+            raise RuntimeError(
+                f"{tool} is not installed or not on PATH.\n"
+                "Install it with:  sudo apt install ffmpeg  (Ubuntu/Debian)\n"
+                "                  brew install ffmpeg       (macOS)"
+            )

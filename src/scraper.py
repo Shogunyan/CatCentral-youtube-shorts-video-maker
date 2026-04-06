@@ -157,7 +157,7 @@ class VideoScraper:
         try:
             import instaloader
 
-            L = instaloader.Instaloader(quiet=True, download_videos=False)
+            L = instaloader.Instaloader(download_videos=False)
             if self.config.instagram_password:
                 L.login(self.config.instagram_username, self.config.instagram_password)
 
