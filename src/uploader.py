@@ -35,6 +35,13 @@ def _is_wsl() -> bool:
 
 def _open_browser(url: str) -> None:
     """Open a URL — tries several methods for WSL, falls back to printing the URL."""
+    # Always save the URL to a file so it can be retrieved if the browser doesn't open
+    try:
+        with open("/tmp/catcentral_auth_url.txt", "w") as f:
+            f.write(url + "\n")
+    except Exception:
+        pass
+
     if _is_wsl():
         for cmd in (
             ["explorer.exe", url],
@@ -43,7 +50,6 @@ def _open_browser(url: str) -> None:
         ):
             try:
                 subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                print(f"\n[AUTH] Opening browser...\n  URL: {url}\n", flush=True)
                 return
             except FileNotFoundError:
                 continue
@@ -54,7 +60,6 @@ def _open_browser(url: str) -> None:
         webbrowser.open(url)
     except Exception:
         pass
-    print(f"\n[AUTH] Could not open browser automatically.\n  Open this URL manually:\n  {url}\n", flush=True)
 
 SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
