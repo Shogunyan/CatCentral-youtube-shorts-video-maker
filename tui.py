@@ -455,7 +455,7 @@ Rule {
 #setup-wrap {
     width: 72;
     height: auto;
-    margin: 1 auto;
+    margin: 1 4;
     padding: 1 3;
     border: round #30363d;
     background: #161b22;
