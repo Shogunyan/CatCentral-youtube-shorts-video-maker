@@ -325,6 +325,78 @@ _PLATFORM_BLUR_REGIONS: dict[str, list[tuple]] = {
 
 _BLUR_STRENGTH = 18  # Gaussian sigma — strong enough to be unreadable
 
+# Pixel std-dev threshold for watermark detection.
+# Clean background: std_dev ≈ 0–12.  Text/logo overlay: std_dev ≈ 25–70+.
+_WATERMARK_STDDEV_THRESHOLD = 22.0
+
+
+def _get_video_size(video_path: Path) -> tuple[int, int]:
+    """Return (width, height) of the first video stream."""
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "csv=p=0", str(video_path),
+        ],
+        capture_output=True, text=True,
+    )
+    w, h = result.stdout.strip().split(",")
+    return int(w), int(h)
+
+
+def _resolve_region(
+    region: tuple, vw: int, vh: int
+) -> tuple[int, int, int, int]:
+    """Resolve ffmpeg-expression coords (iw-N, ih-N) to actual pixel values."""
+    cx_expr, cy_expr, bw, bh = region
+    # Replace iw/ih with actual dimensions, then evaluate the arithmetic
+    cx = int(eval(cx_expr.replace("iw", str(vw)).replace("ih", str(vh))))  # noqa: S307
+    cy = int(eval(cy_expr.replace("iw", str(vw)).replace("ih", str(vh))))  # noqa: S307
+    # Clamp so crop never goes outside the frame
+    cx = max(0, min(cx, vw - bw))
+    cy = max(0, min(cy, vh - bh))
+    return cx, cy, bw, bh
+
+
+def _region_has_watermark(
+    video_path: Path, x: int, y: int, w: int, h: int
+) -> bool:
+    """
+    Return True if the given region of the video looks like it contains a
+    watermark (text, logo, or UI element).
+
+    Method: extract one frame, crop the region to raw grayscale bytes, then
+    measure the pixel standard deviation.  A watermark creates sharp edges and
+    bright/dark contrast that raises std-dev well above a plain background.
+    Fast — reads only a single frame (~10–30 ms per call).
+    """
+    result = subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-ss", "1",                         # skip any fade-in
+            "-i", str(video_path),
+            "-vframes", "1",
+            "-vf", f"crop={w}:{h}:{x}:{y}",
+            "-f", "rawvideo", "-pix_fmt", "gray",
+            "pipe:1",
+        ],
+        capture_output=True,
+    )
+    if result.returncode != 0 or len(result.stdout) < w * h // 2:
+        # If extraction fails, assume there might be a watermark (safe default)
+        return True
+
+    pixels = result.stdout[: w * h]
+    n = len(pixels)
+    mean = sum(pixels) / n
+    std_dev = (sum((p - mean) ** 2 for p in pixels) / n) ** 0.5
+    detected = std_dev > _WATERMARK_STDDEV_THRESHOLD
+    logger.debug(
+        f"Watermark check ({x},{y} {w}×{h}): std_dev={std_dev:.1f} → "
+        f"{'DETECTED' if detected else 'clean'}"
+    )
+    return detected
+
 
 def _blur_source_watermarks(
     input_path: Path,
@@ -332,34 +404,59 @@ def _blur_source_watermarks(
     platform: str = "unknown",
 ) -> Path:
     """
-    Blur only the screen regions where the given platform puts its watermark.
+    Detect then blur platform watermarks in a source clip.
 
-    - YouTube / Instagram: copies the file untouched (no watermarks).
-    - TikTok: blurs bottom-right (logo) and bottom-left (username) only.
-    - unknown: blurs all four corners as a safe fallback.
+    1. Look up the candidate regions for this platform.
+    2. For each candidate, extract one frame and measure pixel variance.
+       Regions with low variance (plain background) are skipped — no blur.
+    3. Only regions that actually contain a watermark are blurred.
+    4. If nothing is detected the file is copied untouched.
     """
-    regions = _PLATFORM_BLUR_REGIONS.get(platform, _PLATFORM_BLUR_REGIONS["unknown"])
+    candidate_regions = _PLATFORM_BLUR_REGIONS.get(
+        platform, _PLATFORM_BLUR_REGIONS["unknown"]
+    )
 
-    if not regions:
-        # Platform is clean — no processing needed
+    if not candidate_regions:
         shutil.copy2(input_path, output_path)
         return output_path
 
-    n = len(regions)
-    # Build a dynamic split → blur → overlay chain for however many regions exist
+    # Probe video dimensions once so we can resolve expression-based coords
+    try:
+        vw, vh = _get_video_size(input_path)
+    except Exception:
+        vw, vh = 1920, 1080  # safe fallback
+
+    # Check each candidate region — keep only those with actual watermark content
+    regions_to_blur = []
+    for region in candidate_regions:
+        x, y, bw, bh = _resolve_region(region, vw, vh)
+        if _region_has_watermark(input_path, x, y, bw, bh):
+            regions_to_blur.append(region)
+        else:
+            logger.debug(f"No watermark detected at ({x},{y}) — skipping blur")
+
+    if not regions_to_blur:
+        logger.debug(f"No watermarks detected in {input_path.name} — copying clean")
+        shutil.copy2(input_path, output_path)
+        return output_path
+
+    logger.debug(
+        f"Blurring {len(regions_to_blur)}/{len(candidate_regions)} "
+        f"region(s) in {input_path.name}"
+    )
+
+    # Build a dynamic split → blur → overlay chain for confirmed regions only
+    n = len(regions_to_blur)
     split_labels = "".join(f"[c{i}]" for i in range(n))
     fc_parts = [f"[0:v]split={n + 1}[base]{split_labels}"]
 
-    for i, (cx, cy, bw, bh) in enumerate(regions):
+    for i, (cx, cy, bw, bh) in enumerate(regions_to_blur):
         fc_parts.append(
             f"[c{i}]crop={bw}:{bh}:{cx}:{cy},gblur=sigma={_BLUR_STRENGTH}[b{i}]"
         )
 
-    # Chain overlays: base → overlay b0 → overlay b1 → … → [out]
     prev = "base"
-    for i, (cx, cy, bw, bh) in enumerate(regions):
-        # Convert crop x/y expressions to overlay x/y
-        # iw-N → W-N  (input dims in crop → output dims in overlay)
+    for i, (cx, cy, bw, bh) in enumerate(regions_to_blur):
         ox = cx.replace("iw", "W")
         oy = cy.replace("ih", "H")
         nxt = "out" if i == n - 1 else f"o{i}"
