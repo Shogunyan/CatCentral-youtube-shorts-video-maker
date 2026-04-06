@@ -1,0 +1,175 @@
+"""
+uploader.py — Authenticates with YouTube via OAuth2 and uploads Shorts.
+
+OAuth flow:
+  1. First run: opens browser for user to approve access → saves token.
+  2. Subsequent runs: loads saved token, auto-refreshes if expired.
+
+The user never needs to re-authenticate unless they revoke access or delete
+data/youtube_token.json.
+"""
+import json
+import logging
+import os
+from pathlib import Path
+
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from googleapiclient.http import MediaFileUpload
+
+logger = logging.getLogger(__name__)
+
+SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+API_SERVICE_NAME = "youtube"
+API_VERSION = "v3"
+
+# YouTube category IDs
+CATEGORY_PETS_ANIMALS = "15"
+
+
+class YouTubeUploader:
+    def __init__(self, config):
+        self.config = config
+        self._service = None
+
+    # ── Authentication ─────────────────────────────────────────────────────────
+
+    def _get_credentials(self) -> Credentials:
+        token_path: Path = self.config.token_path
+        creds = None
+
+        if token_path.exists():
+            try:
+                creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+            except Exception as e:
+                logger.warning(f"Could not load saved token: {e}")
+
+        if creds and creds.valid:
+            return creds
+
+        if creds and creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+                self._save_token(creds)
+                return creds
+            except Exception as e:
+                logger.warning(f"Token refresh failed: {e}")
+                creds = None
+
+        # Build client config dict from individual env vars
+        client_config = {
+            "installed": {
+                "client_id": self.config.google_client_id,
+                "client_secret": self.config.google_client_secret,
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "redirect_uris": ["urn:ietf:wg:oauth:2.0:oob", "http://localhost"],
+            }
+        }
+
+        flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
+        creds = flow.run_local_server(port=0, open_browser=True)
+        self._save_token(creds)
+        return creds
+
+    def _save_token(self, creds: Credentials):
+        self.config.token_path.parent.mkdir(parents=True, exist_ok=True)
+        self.config.token_path.write_text(creds.to_json())
+        logger.debug(f"Token saved to {self.config.token_path}")
+
+    def _get_service(self):
+        if self._service is None:
+            creds = self._get_credentials()
+            self._service = build(API_SERVICE_NAME, API_VERSION, credentials=creds)
+        return self._service
+
+    # ── Upload ─────────────────────────────────────────────────────────────────
+
+    def upload(
+        self,
+        video_path: Path,
+        title: str,
+        description: str,
+        tags: list[str],
+        made_for_kids: bool = False,
+    ) -> str | None:
+        """
+        Upload a video to YouTube as a Short.
+
+        Returns the YouTube video ID on success, None on failure.
+        """
+        # Ensure #shorts is in title for Shorts eligibility
+        if "#shorts" not in title.lower():
+            title = title.rstrip() + " #shorts"
+
+        # YouTube title max length is 100 characters
+        if len(title) > 100:
+            title = title[:97] + "..."
+
+        body = {
+            "snippet": {
+                "title": title,
+                "description": description,
+                "tags": tags,
+                "categoryId": CATEGORY_PETS_ANIMALS,
+                "defaultLanguage": "en",
+                "defaultAudioLanguage": "en",
+            },
+            "status": {
+                "privacyStatus": "public",
+                "selfDeclaredMadeForKids": made_for_kids,
+            },
+        }
+
+        media = MediaFileUpload(
+            str(video_path),
+            mimetype="video/mp4",
+            resumable=True,
+            chunksize=10 * 1024 * 1024,  # 10 MB chunks
+        )
+
+        logger.info(f"Uploading: {title!r} ({video_path.name})")
+        try:
+            service = self._get_service()
+            request = service.videos().insert(
+                part="snippet,status",
+                body=body,
+                media_body=media,
+            )
+
+            response = None
+            while response is None:
+                status, response = request.next_chunk()
+                if status:
+                    pct = int(status.progress() * 100)
+                    logger.info(f"  Upload progress: {pct}%")
+
+            video_id = response.get("id", "")
+            logger.info(f"  ✓ Uploaded! https://www.youtube.com/shorts/{video_id}")
+            return video_id
+
+        except HttpError as e:
+            logger.error(f"YouTube API error: {e.resp.status} — {e.content.decode()}")
+            return None
+        except Exception as e:
+            logger.error(f"Upload failed: {e}")
+            return None
+
+    def test_auth(self) -> bool:
+        """Verify credentials work by fetching the channel list."""
+        try:
+            service = self._get_service()
+            resp = service.channels().list(part="snippet", mine=True).execute()
+            items = resp.get("items", [])
+            if items:
+                name = items[0]["snippet"]["title"]
+                logger.info(f"Authenticated as channel: {name!r}")
+                return True
+            logger.warning("Authentication succeeded but no channel found")
+            return False
+        except Exception as e:
+            logger.error(f"Auth test failed: {e}")
+            return False

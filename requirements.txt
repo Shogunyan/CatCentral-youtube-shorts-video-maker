@@ -1,0 +1,21 @@
+# Core scraping & downloading
+yt-dlp>=2024.3.10
+instaloader>=4.10.3
+
+# Video processing (requires ffmpeg binary installed on system)
+ffmpeg-python>=0.2.0
+Pillow>=10.0.0
+numpy>=1.26.0
+
+# Google / YouTube API
+google-api-python-client>=2.126.0
+google-auth-oauthlib>=1.2.0
+google-auth-httplib2>=0.2.0
+
+# Scheduling & utilities
+schedule>=1.2.1
+python-dotenv>=1.0.1
+requests>=2.31.0
+tqdm>=4.66.2
+colorama>=0.4.6
+httpx>=0.27.0

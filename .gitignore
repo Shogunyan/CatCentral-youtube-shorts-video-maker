@@ -1,0 +1,30 @@
+# Credentials — never commit these
+.env
+data/youtube_token.json
+
+# Downloaded & processed videos
+data/downloaded/
+data/processed/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Logs
+logs/*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
