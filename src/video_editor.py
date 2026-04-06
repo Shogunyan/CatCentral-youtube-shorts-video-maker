@@ -127,8 +127,17 @@ def _process_clip(
 
 # ── Step 2: Title card ────────────────────────────────────────────────────────
 
-def _make_title_card(output_path: Path, title: str, duration: int = 2) -> Path:
-    """Create a black title card with the ranking title centered."""
+def _make_title_card(
+    output_path: Path,
+    title: str,
+    duration: int = 2,
+    tts_audio: Path | None = None,
+) -> Path:
+    """
+    Create a black title card with the ranking title centered.
+    If `tts_audio` is provided the card length matches the TTS clip and the
+    voice plays over it — otherwise a silent card of `duration` seconds is made.
+    """
     title_text = _escape_drawtext(title)
     subtitle_text = _escape_drawtext("Ranking 5 → 1")
 
@@ -143,21 +152,75 @@ def _make_title_card(output_path: Path, title: str, duration: int = 2) -> Path:
         f":x=(w-tw)/2:y=(h-th)/2+60"
     )
 
+    if tts_audio and tts_audio.exists():
+        # Card length = TTS length + small tail; audio = the TTS voice
+        _ffmpeg(
+            "-f", "lavfi",
+            "-i", f"color=c=black:size={TARGET_W}x{TARGET_H}:rate={FPS}",
+            "-i", str(tts_audio),
+            "-vf", vf,
+            "-c:v", VIDEO_CODEC, "-crf", VIDEO_CRF, "-preset", "fast",
+            "-c:a", AUDIO_CODEC, "-b:a", AUDIO_BITRATE, "-ar", "44100", "-ac", "2",
+            "-shortest",          # end when the TTS clip ends
+            "-movflags", "+faststart",
+            str(output_path),
+        )
+    else:
+        # Silent title card
+        _ffmpeg(
+            "-f", "lavfi",
+            "-i", f"color=c=black:size={TARGET_W}x{TARGET_H}:rate={FPS}",
+            "-f", "lavfi",
+            "-i", "anullsrc=r=44100:cl=stereo",
+            "-t", str(duration),
+            "-vf", vf,
+            "-c:v", VIDEO_CODEC, "-crf", VIDEO_CRF, "-preset", "fast",
+            "-c:a", AUDIO_CODEC, "-b:a", AUDIO_BITRATE, "-ar", "44100", "-ac", "2",
+            "-movflags", "+faststart",
+            str(output_path),
+        )
+    return output_path
+
+
+# ── TTS mixing helper ─────────────────────────────────────────────────────────
+
+def _mix_tts_into_clip(
+    video_path: Path,
+    tts_path: Path,
+    output_path: Path,
+) -> Path:
+    """
+    Overlay a TTS announcement onto the first few seconds of a clip.
+
+    While the voice speaks, the original audio is ducked to 15%.
+    Once the voice finishes, the original audio smoothly restores to 100%.
+    """
+    from src.tts import get_audio_duration, has_audio_stream
+
+    tts_dur = get_audio_duration(tts_path)
+    restore_at = round(tts_dur + 0.35, 2)   # start restoring audio slightly after voice
+
+    orig_exists = has_audio_stream(video_path)
+
+    if orig_exists:
+        # Duck original audio while TTS plays, then restore
+        audio_fc = (
+            f"[0:a]volume='if(lt(t,{restore_at}),0.15,1.0)':eval=frame[orig];"
+            f"[1:a]volume=1.6[tts];"
+            f"[orig][tts]amix=inputs=2:duration=first:normalize=0[a]"
+        )
+    else:
+        # No original audio — TTS is the only audio track
+        audio_fc = "[1:a]volume=1.6[a]"
+
     _ffmpeg(
-        "-f", "lavfi",
-        "-i", f"color=c=black:size={TARGET_W}x{TARGET_H}:rate={FPS}",
-        "-f", "lavfi",
-        "-i", "anullsrc=r=44100:cl=stereo",
-        "-t", str(duration),
-        "-vf", vf,
-        "-c:v", VIDEO_CODEC,
-        "-crf", VIDEO_CRF,
-        "-preset", "fast",
-        "-c:a", AUDIO_CODEC,
-        "-b:a", AUDIO_BITRATE,
-        "-ar", "44100",
-        "-ac", "2",
-        "-movflags", "+faststart",
+        "-i", str(video_path),
+        "-i", str(tts_path),
+        "-filter_complex", audio_fc,
+        "-map", "0:v",
+        "-map", "[a]",
+        "-c:v", "copy",
+        "-c:a", AUDIO_CODEC, "-b:a", AUDIO_BITRATE, "-ar", "44100", "-ac", "2",
         str(output_path),
     )
     return output_path
@@ -285,6 +348,7 @@ def create_ranking_video(
     config,
     blur_source_watermarks: bool = True,
     on_progress=None,
+    tts_audio: dict | None = None,
 ) -> Path:
     """
     Build a ranking-style Shorts video from exactly `config.clips_per_video` clips.
@@ -328,12 +392,21 @@ def create_ranking_video(
                 _step(f"Processing clip {idx + 1}/{n}  (rank #{rank})…")
                 _process_clip(src, step1, rank, clip_duration, title)
 
-            processed.append(step1)
+            # Mix TTS voiceover if available for this clip
+            rank_tts_list = (tts_audio or {}).get("ranks") or []
+            if idx < len(rank_tts_list) and rank_tts_list[idx].exists():
+                _step(f"Mixing voice for clip {idx + 1}/{n}  (rank #{rank})…")
+                step1_tts = tmp / f"step1_rank{rank}_voiced.mp4"
+                _mix_tts_into_clip(step1, rank_tts_list[idx], step1_tts)
+                processed.append(step1_tts)
+            else:
+                processed.append(step1)
 
         # ── 2. Title card ─────────────────────────────────────────────────────
         _step("Creating title card…")
         title_card = tmp / "title_card.mp4"
-        _make_title_card(title_card, title, duration=2)
+        intro_tts = (tts_audio or {}).get("intro")
+        _make_title_card(title_card, title, duration=2, tts_audio=intro_tts)
 
         # ── 3. Concatenate: title card first, then rank 5→1 ──────────────────
         _step("Concatenating all clips…")

@@ -30,6 +30,12 @@ class Config:
     clip_duration: int = int(os.getenv("CLIP_DURATION", "10"))
     watermark_text: str = os.getenv("WATERMARK_TEXT", "@CatCentral")
 
+    # ── TTS voiceover ──────────────────────────────────────────────────────────
+    # Voice options: en-US-GuyNeural (Reddit narrator), en-US-EricNeural,
+    #                en-US-ChristopherNeural, en-GB-RyanNeural (British)
+    tts_enabled: bool = os.getenv("TTS_ENABLED", "true").lower() == "true"
+    tts_voice: str = os.getenv("TTS_VOICE", "en-US-GuyNeural")
+
     # ── Paths ──────────────────────────────────────────────────
     base_dir: Path = Path(__file__).parent
     data_dir: Path = base_dir / "data"

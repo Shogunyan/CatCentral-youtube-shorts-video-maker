@@ -1,6 +1,9 @@
 # Terminal UI
 textual>=0.47.0
 
+# AI voiceover (free Microsoft Edge TTS — no API key needed)
+edge-tts>=6.1.9
+
 # Core scraping & downloading
 yt-dlp>=2024.3.10
 instaloader>=4.10.3

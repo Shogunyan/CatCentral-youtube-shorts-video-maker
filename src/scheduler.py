@@ -15,6 +15,7 @@ so the TUI (or any other caller) can display live updates.
 """
 import logging
 import random
+import shutil
 import signal
 import sys
 import time
@@ -126,21 +127,40 @@ class Pipeline:
         title = caption["title"]
         self._report(48, "✏  Caption ready", f"Title: {title}")
 
+        # ── 3b. TTS voiceover ─────────────────────────────────────────────────
+        tts_audio = None
+        tts_tmp: Path | None = None
+        if self.config.tts_enabled and not self.dry_run:
+            self._report(49, "🎙  Generating AI voiceover…",
+                         f"Using voice: {self.config.tts_voice}")
+            try:
+                from src.tts import TTSGenerator
+                tts_tmp = self.config.data_dir / f"tts_{run_id}"
+                tts_gen = TTSGenerator(voice=self.config.tts_voice)
+                tts_audio = tts_gen.generate_all(n, tts_tmp)
+                self._report(50, "🎙  Voiceover ready", "AI voice clips generated")
+            except Exception as e:
+                self._report(50, "🎙  Voiceover skipped",
+                             f"TTS failed (continuing without voice): {e}")
+                logger.warning(f"TTS generation failed: {e}")
+                tts_audio = None
+
         # ── 4. Build video ────────────────────────────────────────────────────
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = self.config.processed_dir / f"ranking_{ts}_{run_id}.mp4"
 
         # Video editor reports each step via this callback
         video_step = [0]
-        # blur + process per clip + title card + concat + watermark
-        total_video_steps = n * 2 + 3
+        # blur + process + optional tts mix per clip + title card + concat + watermark
+        tts_mix_steps = n if tts_audio else 0
+        total_video_steps = n * 2 + tts_mix_steps + 3
 
         def on_video_step(step_msg: str) -> None:
             video_step[0] += 1
-            pct = 50 + int(video_step[0] / total_video_steps * 38)
+            pct = 52 + int(video_step[0] / total_video_steps * 36)
             self._report(min(pct, 88), f"🎬  {step_msg}", step_msg)
 
-        self._report(50, "🎬  Building ranking video…",
+        self._report(52, "🎬  Building ranking video…",
                      "Starting video processing — this takes 1–3 minutes")
 
         try:
@@ -151,6 +171,7 @@ class Pipeline:
                     output_path=output_path,
                     config=self.config,
                     on_progress=on_video_step,
+                    tts_audio=tts_audio,
                 )
             else:
                 logger.info(f"[DRY RUN] Would write video to {output_path}")
@@ -159,9 +180,13 @@ class Pipeline:
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 output_path.touch()
         except Exception as e:
-            self._report(50, "❌  Video creation failed", str(e))
+            self._report(52, "❌  Video creation failed", str(e))
             logger.error(f"Video creation failed: {e}", exc_info=True)
             return False
+        finally:
+            # Clean up TTS temp files regardless of success/failure
+            if tts_tmp and tts_tmp.exists():
+                shutil.rmtree(tts_tmp, ignore_errors=True)
 
         # ── 5. Upload ─────────────────────────────────────────────────────────
         self._report(90, "📤  Uploading to YouTube…",
