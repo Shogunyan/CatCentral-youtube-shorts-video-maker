@@ -112,7 +112,7 @@ class YouTubeUploader:
         _orig = webbrowser.open
         webbrowser.open = lambda url, new=0, autoraise=True: _open_browser(url) or True
         try:
-            creds = flow.run_local_server(port=8080, open_browser=True)
+            creds = flow.run_local_server(port=0, open_browser=True)
         finally:
             webbrowser.open = _orig
         self._save_token(creds)
