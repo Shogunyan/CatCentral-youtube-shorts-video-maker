@@ -11,6 +11,8 @@ data/youtube_token.json.
 import json
 import logging
 import os
+import subprocess
+import webbrowser
 from pathlib import Path
 
 from google.auth.transport.requests import Request
@@ -21,6 +23,25 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
 logger = logging.getLogger(__name__)
+
+
+def _is_wsl() -> bool:
+    try:
+        with open("/proc/version") as f:
+            return "microsoft" in f.read().lower()
+    except Exception:
+        return False
+
+
+def _open_browser(url: str) -> None:
+    """Open a URL — uses cmd.exe on WSL so the Windows browser launches."""
+    if _is_wsl():
+        try:
+            subprocess.Popen(["cmd.exe", "/c", "start", "", url.replace("&", "^&")])
+            return
+        except Exception:
+            pass
+    webbrowser.open(url)
 
 SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
@@ -74,7 +95,13 @@ class YouTubeUploader:
         }
 
         flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
-        creds = flow.run_local_server(port=0, open_browser=True)
+        # Patch webbrowser.open so WSL redirects to the Windows browser
+        _orig = webbrowser.open
+        webbrowser.open = lambda url, new=0, autoraise=True: _open_browser(url) or True
+        try:
+            creds = flow.run_local_server(port=8080, open_browser=True)
+        finally:
+            webbrowser.open = _orig
         self._save_token(creds)
         return creds
 
