@@ -119,7 +119,7 @@ class Pipeline:
         random.shuffle(downloaded)
         clip_paths = [p for _, p in downloaded]
         clip_platforms = [m.get("platform", "unknown") for m, _ in downloaded]
-        used_ids = [m["id"] for m, _ in downloaded]
+        used_metas = [m for m, _ in downloaded]
 
         # ── 3. Caption ────────────────────────────────────────────────────────
         self._report(46, "✏  Generating caption…",
@@ -211,7 +211,7 @@ class Pipeline:
                 return False
 
         # ── Done ──────────────────────────────────────────────────────────────
-        self.scraper.mark_used(used_ids)
+        self.scraper.mark_used(used_metas)
         self._report(
             100,
             "✅  Done!  Video is live on YouTube.",

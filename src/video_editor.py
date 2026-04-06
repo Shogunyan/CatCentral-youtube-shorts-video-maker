@@ -310,24 +310,30 @@ _PLATFORM_BLUR_REGIONS: dict[str, list[tuple]] = {
     "instagram": [],   # clean download — skip entirely
     "tiktok": [
         # bottom-right: TikTok logo (~180×180 px)
-        ("iw-180", "ih-180", 180, 180),
+        ("iw-180",    "ih-180", 180, 180),
         # bottom-left: username / description strip (~300×100 px)
-        ("0",      "ih-100", 300, 100),
+        ("0",          "ih-100", 300, 100),
     ],
+    # "unknown" = any other platform or reposted content.
+    # Covers every common watermark position: 4 corners + center-bottom
+    # (CapCut, editing apps, news tickers, and misc site watermarks).
+    # Detection still runs on each region — only confirmed ones are blurred.
     "unknown": [
-        # fallback: all four corners at a modest size
-        ("0",       "0",       180, 100),
-        ("iw-180",  "0",       180, 100),
-        ("0",       "ih-100",  180, 100),
-        ("iw-180",  "ih-100",  180, 100),
+        ("0",              "0",       180, 100),   # top-left
+        ("iw-180",         "0",       180, 100),   # top-right
+        ("0",              "ih-100",  180, 100),   # bottom-left
+        ("iw-180",         "ih-100",  180, 100),   # bottom-right
+        ("iw//2-200",      "ih-80",   400,  80),   # center-bottom (CapCut etc.)
     ],
 }
 
-_BLUR_STRENGTH = 18  # Gaussian sigma — strong enough to be unreadable
+_BLUR_STRENGTH = 18         # Gaussian sigma — strong enough to be unreadable
 
-# Pixel std-dev threshold for watermark detection.
-# Clean background: std_dev ≈ 0–12.  Text/logo overlay: std_dev ≈ 25–70+.
-_WATERMARK_STDDEV_THRESHOLD = 22.0
+# Pixel std-dev threshold: clean background ≈ 0–12, watermark text/logo ≈ 25–70+
+_WATERMARK_STDDEV_THRESHOLD   = 22.0
+# Mean absolute pixel difference between frames: static watermark ≈ 0–8,
+# animated watermark ≈ 8–18, video content ≈ 20–80+
+_WATERMARK_TEMPORAL_THRESHOLD = 20.0
 
 
 def _get_video_size(video_path: Path) -> tuple[int, int]:
@@ -358,23 +364,14 @@ def _resolve_region(
     return cx, cy, bw, bh
 
 
-def _region_has_watermark(
-    video_path: Path, x: int, y: int, w: int, h: int
-) -> bool:
-    """
-    Return True if the given region of the video looks like it contains a
-    watermark (text, logo, or UI element).
-
-    Method: extract one frame, crop the region to raw grayscale bytes, then
-    measure the pixel standard deviation.  A watermark creates sharp edges and
-    bright/dark contrast that raises std-dev well above a plain background.
-    Fast — reads only a single frame (~10–30 ms per call).
-    """
+def _get_region_pixels(
+    video_path: Path, x: int, y: int, w: int, h: int, seek: float
+) -> bytes | None:
+    """Extract raw grayscale pixels from a single frame region at `seek` seconds."""
     result = subprocess.run(
         [
             "ffmpeg", "-hide_banner", "-loglevel", "error",
-            "-ss", "1",                         # skip any fade-in
-            "-i", str(video_path),
+            "-ss", str(seek), "-i", str(video_path),
             "-vframes", "1",
             "-vf", f"crop={w}:{h}:{x}:{y}",
             "-f", "rawvideo", "-pix_fmt", "gray",
@@ -383,19 +380,50 @@ def _region_has_watermark(
         capture_output=True,
     )
     if result.returncode != 0 or len(result.stdout) < w * h // 2:
-        # If extraction fails, assume there might be a watermark (safe default)
-        return True
+        return None
+    return result.stdout[: w * h]
 
-    pixels = result.stdout[: w * h]
-    n = len(pixels)
-    mean = sum(pixels) / n
-    std_dev = (sum((p - mean) ** 2 for p in pixels) / n) ** 0.5
-    detected = std_dev > _WATERMARK_STDDEV_THRESHOLD
-    logger.debug(
-        f"Watermark check ({x},{y} {w}×{h}): std_dev={std_dev:.1f} → "
-        f"{'DETECTED' if detected else 'clean'}"
-    )
-    return detected
+
+def _region_has_watermark(
+    video_path: Path, x: int, y: int, w: int, h: int
+) -> bool:
+    """
+    Return True if the given region looks like a watermark (text, logo, UI element).
+
+    Two-stage check:
+    1. High pixel variance  — something with sharp edges / contrast is here.
+    2. Temporal stability   — it barely changes between frames, meaning it's a
+       static overlay rather than busy video content that happens to be complex.
+
+    Sampling two frames (at 1 s and 3 s) is fast (~20–40 ms total) and
+    reliably separates static watermarks from moving cat footage.
+    """
+    px1 = _get_region_pixels(video_path, x, y, w, h, seek=1.0)
+    if px1 is None:
+        return True   # can't read → safe default: assume watermark
+
+    n = len(px1)
+    mean1 = sum(px1) / n
+    std_dev = (sum((p - mean1) ** 2 for p in px1) / n) ** 0.5
+
+    if std_dev < _WATERMARK_STDDEV_THRESHOLD:
+        logger.debug(f"  ({x},{y}): std={std_dev:.1f} → plain background")
+        return False
+
+    # High variance detected — now check if it's static (watermark) or moving (content)
+    px2 = _get_region_pixels(video_path, x, y, w, h, seek=3.0)
+    if px2 is not None and len(px2) == n:
+        mean_diff = sum(abs(a - b) for a, b in zip(px1, px2)) / n
+        is_watermark = mean_diff < _WATERMARK_TEMPORAL_THRESHOLD
+        logger.debug(
+            f"  ({x},{y}): std={std_dev:.1f}, Δframes={mean_diff:.1f} → "
+            f"{'WATERMARK' if is_watermark else 'video content'}"
+        )
+        return is_watermark
+
+    # Only got one frame — high variance alone is enough to flag
+    logger.debug(f"  ({x},{y}): std={std_dev:.1f} → WATERMARK (single frame)")
+    return True
 
 
 def _blur_source_watermarks(

@@ -3,6 +3,13 @@ scraper.py — Discovers viral cat video URLs from YouTube Shorts, TikTok, and I
 
 No videos are downloaded here — only metadata (URL, view count, duration, etc.) is
 collected so the caller can decide which clips to actually fetch.
+
+Candidate selection runs in three phases:
+  Phase 1 — Current viral: fresh (never-used) clips from trending searches.
+  Phase 2 — Older viral:   if Phase 1 comes up short, search timeless/popular
+             content with minimum engagement thresholds per platform.
+  Phase 3 — Reuse filler:  if still short, allow clips that have been used fewer
+             than MAX_CLIP_REUSE times to fill remaining slots.
 """
 import json
 import logging
@@ -13,7 +20,21 @@ import yt_dlp
 
 logger = logging.getLogger(__name__)
 
-# ── Search targets ────────────────────────────────────────────────────────────
+# A clip may appear in up to this many ranking videos before being retired.
+MAX_CLIP_REUSE = 2
+
+# ── Minimum engagement for "older viral" tier ─────────────────────────────────
+# YouTube / Instagram: view_count.  TikTok: like_count (falls back to view_count).
+OLDER_VIRAL_MIN = {
+    "youtube":   50_000,
+    "tiktok":   300_000,   # likes; fallback threshold if like_count unavailable
+    "instagram":  30_000,
+}
+# When like_count is unavailable for TikTok, use this view_count proxy instead.
+# (300 k likes ≈ 1 M+ views on typical TikTok content.)
+TIKTOK_OLDER_VIEW_PROXY = 1_000_000
+
+# ── Current viral search targets ──────────────────────────────────────────────
 
 YOUTUBE_QUERIES = [
     "funny cat videos shorts",
@@ -46,33 +67,91 @@ INSTAGRAM_HASHTAGS = [
     "catvideos",
 ]
 
+# ── Older viral search targets ────────────────────────────────────────────────
+# Queries / hashtags that naturally surface timeless popular content.
+
+YOUTUBE_OLDER_QUERIES = [
+    "funniest cat videos of all time",
+    "best cat moments ever shorts",
+    "classic cat fails shorts",
+    "most popular cat videos shorts",
+    "viral cats best compilation shorts",
+    "top cat videos all time shorts",
+    "legendary cat moments shorts",
+]
+
+TIKTOK_OLDER_HASHTAGS = [
+    "bestcats",
+    "funnycatvideos",
+    "catfunny",
+    "catlover",
+    "catsoftiktok",
+    "catmoment",
+]
+
+INSTAGRAM_OLDER_HASHTAGS = [
+    "bestcats",
+    "catmoments",
+    "funnycats",
+]
+
 
 class VideoScraper:
     def __init__(self, config):
         self.config = config
-        self._used: set[str] = self._load_used()
+        # _used: {video_id: {"count": int, "url": str, "platform": str,
+        #                     "title": str, "view_count": int}}
+        self._used: dict[str, dict] = self._load_used()
 
     # ── Persistence ────────────────────────────────────────────────────────────
 
-    def _load_used(self) -> set[str]:
+    def _load_used(self) -> dict[str, dict]:
         p = self.config.used_videos_path
         if p.exists():
             try:
-                return set(json.loads(p.read_text()))
+                data = json.loads(p.read_text())
+                if isinstance(data, list):
+                    # Migrate old list format — treat every entry as maxed out
+                    # (no URL saved, so they can't be reused anyway)
+                    return {vid_id: {"count": MAX_CLIP_REUSE} for vid_id in data}
+                if isinstance(data, dict):
+                    return data
             except Exception:
                 pass
-        return set()
+        return {}
 
-    def _save_used(self):
+    def _save_used(self) -> None:
         p = self.config.used_videos_path
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(sorted(self._used)))
+        p.write_text(json.dumps(self._used, indent=2))
 
-    def mark_used(self, video_ids: list[str]):
-        self._used.update(video_ids)
+    def mark_used(self, video_metas: list[dict]) -> None:
+        """
+        Record that these clips were used in a video.
+        Accepts full metadata dicts so URLs are preserved for potential reuse.
+        """
+        for meta in video_metas:
+            vid_id = meta.get("id", "")
+            if not vid_id:
+                continue
+            existing = self._used.get(vid_id, {})
+            self._used[vid_id] = {
+                "count":      existing.get("count", 0) + 1,
+                "url":        meta.get("url") or existing.get("url", ""),
+                "platform":   meta.get("platform") or existing.get("platform", "unknown"),
+                "title":      meta.get("title") or existing.get("title", ""),
+                "view_count": meta.get("view_count") or existing.get("view_count", 0),
+            }
         self._save_used()
 
-    # ── Platform scrapers ──────────────────────────────────────────────────────
+    def _is_used(self, vid_id: str) -> bool:
+        """True if this clip has hit the reuse limit and should never appear again."""
+        return self._used.get(vid_id, {}).get("count", 0) >= MAX_CLIP_REUSE
+
+    def _use_count(self, vid_id: str) -> int:
+        return self._used.get(vid_id, {}).get("count", 0)
+
+    # ── Low-level yt-dlp helper ───────────────────────────────────────────────
 
     def _ydl_extract_flat(self, url: str, playlist_end: int = 25) -> list[dict]:
         """Run yt-dlp in flat-extract mode and return the entries list."""
@@ -92,7 +171,11 @@ class VideoScraper:
             logger.debug(f"yt-dlp flat extract failed for {url}: {e}")
         return []
 
-    def scrape_youtube_shorts(self, query: str, max_results: int = 20) -> list[dict]:
+    # ── Platform scrapers ──────────────────────────────────────────────────────
+
+    def scrape_youtube_shorts(
+        self, query: str, max_results: int = 20, min_views: int = 0
+    ) -> list[dict]:
         """Search YouTube and return metadata for cat-relevant short clips."""
         search_url = f"ytsearch{max_results}:{query}"
         entries = self._ydl_extract_flat(search_url, playlist_end=max_results)
@@ -102,24 +185,28 @@ class VideoScraper:
             if not e:
                 continue
             vid_id = e.get("id", "")
-            if not vid_id or vid_id in self._used:
+            if not vid_id or self._is_used(vid_id):
                 continue
             duration = e.get("duration") or 0
             if duration and duration > 60:
                 continue  # skip non-Shorts
-            videos.append(
-                {
-                    "id": vid_id,
-                    "url": f"https://www.youtube.com/shorts/{vid_id}",
-                    "title": e.get("title", ""),
-                    "view_count": e.get("view_count") or 0,
-                    "platform": "youtube",
-                    "duration": duration,
-                }
-            )
+            view_count = e.get("view_count") or 0
+            if view_count < min_views:
+                continue
+            videos.append({
+                "id":         vid_id,
+                "url":        f"https://www.youtube.com/shorts/{vid_id}",
+                "title":      e.get("title", ""),
+                "view_count": view_count,
+                "like_count": e.get("like_count") or 0,
+                "platform":   "youtube",
+                "duration":   duration,
+            })
         return sorted(videos, key=lambda x: x["view_count"], reverse=True)
 
-    def scrape_tiktok(self, hashtag: str, max_results: int = 20) -> list[dict]:
+    def scrape_tiktok(
+        self, hashtag: str, max_results: int = 20, min_likes: int = 0
+    ) -> list[dict]:
         """Scrape a TikTok hashtag feed."""
         url = f"https://www.tiktok.com/tag/{hashtag}"
         entries = self._ydl_extract_flat(url, playlist_end=max_results)
@@ -129,7 +216,7 @@ class VideoScraper:
             if not e:
                 continue
             vid_id = e.get("id", "")
-            if not vid_id or vid_id in self._used:
+            if not vid_id or self._is_used(vid_id):
                 continue
             duration = e.get("duration") or 0
             if duration and duration > 180:
@@ -137,19 +224,31 @@ class VideoScraper:
             page_url = e.get("url") or e.get("webpage_url") or ""
             if not page_url:
                 continue
-            videos.append(
-                {
-                    "id": vid_id,
-                    "url": page_url,
-                    "title": e.get("title", ""),
-                    "view_count": e.get("view_count") or 0,
-                    "platform": "tiktok",
-                    "duration": duration,
-                }
-            )
+
+            view_count = e.get("view_count") or 0
+            like_count = e.get("like_count") or 0
+
+            # Apply engagement filter: prefer like_count; fall back to view proxy
+            if min_likes > 0:
+                if like_count and like_count < min_likes:
+                    continue
+                elif not like_count and view_count < TIKTOK_OLDER_VIEW_PROXY:
+                    continue
+
+            videos.append({
+                "id":         vid_id,
+                "url":        page_url,
+                "title":      e.get("title", ""),
+                "view_count": view_count,
+                "like_count": like_count,
+                "platform":   "tiktok",
+                "duration":   duration,
+            })
         return sorted(videos, key=lambda x: x["view_count"], reverse=True)
 
-    def scrape_instagram(self, hashtag: str, max_results: int = 20) -> list[dict]:
+    def scrape_instagram(
+        self, hashtag: str, max_results: int = 20, min_views: int = 0
+    ) -> list[dict]:
         """Scrape Instagram hashtag videos (requires instaloader + optional login)."""
         if not self.config.instagram_username:
             logger.debug("Instagram credentials not set, skipping Instagram scrape")
@@ -169,74 +268,191 @@ class VideoScraper:
                 if not post.is_video:
                     continue
                 pid = str(post.mediaid)
-                if pid in self._used:
+                if self._is_used(pid):
                     continue
-                videos.append(
-                    {
-                        "id": pid,
-                        "url": f"https://www.instagram.com/p/{post.shortcode}/",
-                        "title": (post.caption or "")[:100],
-                        "view_count": post.video_view_count or 0,
-                        "platform": "instagram",
-                        "duration": post.video_duration or 0,
-                    }
-                )
+                view_count = post.video_view_count or 0
+                if view_count < min_views:
+                    continue
+                videos.append({
+                    "id":         pid,
+                    "url":        f"https://www.instagram.com/p/{post.shortcode}/",
+                    "title":      (post.caption or "")[:100],
+                    "view_count": view_count,
+                    "like_count": 0,
+                    "platform":   "instagram",
+                    "duration":   post.video_duration or 0,
+                })
             return sorted(videos, key=lambda x: x["view_count"], reverse=True)
         except Exception as e:
             logger.warning(f"Instagram scrape failed for #{hashtag}: {e}")
             return []
 
-    # ── Aggregate scraper ─────────────────────────────────────────────────────
+    # ── Scraping phases ───────────────────────────────────────────────────────
 
-    def get_candidates(self, want: int = 15) -> list[dict]:
-        """
-        Collect more candidates than needed across all platforms.
-        Returns a deduplicated, view-count-sorted list.
-        """
+    def _scrape_current(self) -> list[dict]:
+        """Phase 1: scrape currently trending / recently viral content."""
         all_videos: list[dict] = []
 
-        # YouTube — pick 3 random queries
         yt_queries = random.sample(YOUTUBE_QUERIES, min(3, len(YOUTUBE_QUERIES)))
         for q in yt_queries:
             try:
                 vids = self.scrape_youtube_shorts(q, max_results=15)
                 all_videos.extend(vids[:6])
-                logger.debug(f"YouTube '{q}': {len(vids)} results")
+                logger.debug(f"[current] YouTube '{q}': {len(vids)} results")
             except Exception as e:
                 logger.warning(f"YouTube query '{q}' failed: {e}")
 
-        # TikTok — pick 2 random hashtags
         tt_tags = random.sample(TIKTOK_HASHTAGS, min(2, len(TIKTOK_HASHTAGS)))
         for tag in tt_tags:
             try:
                 vids = self.scrape_tiktok(tag, max_results=10)
                 all_videos.extend(vids[:4])
-                logger.debug(f"TikTok #{tag}: {len(vids)} results")
+                logger.debug(f"[current] TikTok #{tag}: {len(vids)} results")
             except Exception as e:
                 logger.warning(f"TikTok #{tag} failed: {e}")
 
-        # Instagram — optional
         if self.config.instagram_username:
             ig_tag = random.choice(INSTAGRAM_HASHTAGS)
             try:
                 vids = self.scrape_instagram(ig_tag, max_results=10)
                 all_videos.extend(vids[:3])
-                logger.debug(f"Instagram #{ig_tag}: {len(vids)} results")
+                logger.debug(f"[current] Instagram #{ig_tag}: {len(vids)} results")
             except Exception as e:
                 logger.warning(f"Instagram #{ig_tag} failed: {e}")
 
-        # Deduplicate by ID and exclude already-used
-        seen: set[str] = set()
-        unique: list[dict] = []
-        for v in all_videos:
-            vid_id = v["id"]
-            if vid_id and vid_id not in seen and vid_id not in self._used:
-                seen.add(vid_id)
-                unique.append(v)
+        return all_videos
 
-        # Sort by view count descending, then shuffle top-N slightly for variety
-        unique.sort(key=lambda x: x["view_count"], reverse=True)
-        top_pool = unique[: max(want * 3, 20)]
-        random.shuffle(top_pool)
-        logger.info(f"Scraper found {len(unique)} unique candidates, returning top {len(top_pool)}")
-        return top_pool
+    def _scrape_older_viral(self) -> list[dict]:
+        """
+        Phase 2: scrape timeless/older viral content with minimum engagement
+        thresholds (YouTube ≥50 k views, TikTok ≥300 k likes, Instagram ≥30 k views).
+        """
+        all_videos: list[dict] = []
+        logger.info("Phase 2: scraping older viral pool…")
+
+        yt_queries = random.sample(YOUTUBE_OLDER_QUERIES, min(3, len(YOUTUBE_OLDER_QUERIES)))
+        for q in yt_queries:
+            try:
+                vids = self.scrape_youtube_shorts(
+                    q, max_results=20,
+                    min_views=OLDER_VIRAL_MIN["youtube"],
+                )
+                all_videos.extend(vids[:6])
+                logger.debug(f"[older] YouTube '{q}': {len(vids)} results")
+            except Exception as e:
+                logger.warning(f"[older] YouTube '{q}' failed: {e}")
+
+        tt_tags = random.sample(TIKTOK_OLDER_HASHTAGS, min(2, len(TIKTOK_OLDER_HASHTAGS)))
+        for tag in tt_tags:
+            try:
+                vids = self.scrape_tiktok(
+                    tag, max_results=15,
+                    min_likes=OLDER_VIRAL_MIN["tiktok"],
+                )
+                all_videos.extend(vids[:5])
+                logger.debug(f"[older] TikTok #{tag}: {len(vids)} results")
+            except Exception as e:
+                logger.warning(f"[older] TikTok #{tag} failed: {e}")
+
+        if self.config.instagram_username:
+            ig_tag = random.choice(INSTAGRAM_OLDER_HASHTAGS)
+            try:
+                vids = self.scrape_instagram(
+                    ig_tag, max_results=10,
+                    min_views=OLDER_VIRAL_MIN["instagram"],
+                )
+                all_videos.extend(vids[:3])
+                logger.debug(f"[older] Instagram #{ig_tag}: {len(vids)} results")
+            except Exception as e:
+                logger.warning(f"[older] Instagram #{ig_tag} failed: {e}")
+
+        return all_videos
+
+    def _get_reusable_candidates(self) -> list[dict]:
+        """
+        Phase 3: reconstruct candidate dicts for clips that have been used
+        fewer than MAX_CLIP_REUSE times.  URLs were saved at mark_used() time.
+        """
+        reusable = []
+        for vid_id, data in self._used.items():
+            if data.get("count", 0) < MAX_CLIP_REUSE and data.get("url"):
+                reusable.append({
+                    "id":         vid_id,
+                    "url":        data["url"],
+                    "platform":   data.get("platform", "unknown"),
+                    "title":      data.get("title", ""),
+                    "view_count": data.get("view_count", 0),
+                    "like_count": 0,
+                    "duration":   0,
+                    "_reuse":     True,   # internal flag for logging
+                })
+        return reusable
+
+    # ── Main public API ───────────────────────────────────────────────────────
+
+    def get_candidates(self, want: int = 15) -> list[dict]:
+        """
+        Return a pool of candidate videos, preferring fresh content.
+
+        Phase 1 — Current viral:  fresh clips from trending searches.
+        Phase 2 — Older viral:    timeless clips with high engagement floors.
+                                  Only triggered if Phase 1 yields < want fresh clips.
+        Phase 3 — Reuse filler:   previously-used clips (up to MAX_CLIP_REUSE times).
+                                  Only fills remaining slots after Phases 1+2.
+        """
+        def _dedup(videos: list[dict]) -> list[dict]:
+            seen: set[str] = set()
+            out: list[dict] = []
+            for v in videos:
+                if v["id"] and v["id"] not in seen:
+                    seen.add(v["id"])
+                    out.append(v)
+            return out
+
+        # ── Phase 1 ───────────────────────────────────────────────────────────
+        current = _dedup(self._scrape_current())
+        fresh = [v for v in current if self._use_count(v["id"]) == 0]
+        logger.info(f"Phase 1: {len(fresh)} fresh current candidates")
+
+        # ── Phase 2 (only if needed) ──────────────────────────────────────────
+        if len(fresh) < want:
+            older = _dedup(self._scrape_older_viral())
+            fresh_older = [v for v in older if self._use_count(v["id"]) == 0]
+            logger.info(f"Phase 2: {len(fresh_older)} fresh older-viral candidates")
+            # Merge: current fresh first (higher priority), then older fresh
+            all_fresh = _dedup(fresh + fresh_older)
+        else:
+            all_fresh = fresh
+
+        # ── Phase 3 (fill remaining slots with reusable clips) ────────────────
+        if len(all_fresh) < want:
+            reusable = self._get_reusable_candidates()
+            # Exclude any IDs already in all_fresh
+            fresh_ids = {v["id"] for v in all_fresh}
+            reusable = [v for v in reusable if v["id"] not in fresh_ids]
+            logger.info(
+                f"Phase 3: {len(reusable)} reusable clips available as filler"
+            )
+            combined = all_fresh + reusable
+        else:
+            combined = all_fresh
+
+        if not combined:
+            logger.warning("No candidates found across all phases")
+            return []
+
+        # Sort fresh clips by view count, reuse fillers after
+        fresh_pool  = [v for v in combined if not v.get("_reuse")]
+        reuse_pool  = [v for v in combined if v.get("_reuse")]
+        fresh_pool.sort(key=lambda x: x["view_count"], reverse=True)
+
+        # Take top-N fresh, pad with reuse
+        target = max(want * 3, 20)
+        pool = fresh_pool[:target] + reuse_pool[: max(0, target - len(fresh_pool))]
+
+        random.shuffle(pool)
+        logger.info(
+            f"Returning {len(pool)} candidates "
+            f"({len(fresh_pool)} fresh + {len(reuse_pool)} reusable)"
+        )
+        return pool
