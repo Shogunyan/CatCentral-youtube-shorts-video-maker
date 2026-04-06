@@ -284,6 +284,19 @@ class DashboardScreen(Screen):
         self._cfg = Config()
         self._refresh_sched_label()
         self._log("CatCentral ready.  Press  R  or click  Run Now  to start.")
+        self._check_tracker_on_mount()
+
+    @work(thread=True)
+    def _check_tracker_on_mount(self) -> None:
+        """Background check: show any pending re-upload / milestone notifications."""
+        try:
+            from src.video_tracker import VideoTracker
+            tracker = VideoTracker(self._cfg)
+            notes = tracker.get_startup_notifications()
+            for note in notes:
+                self.app.call_from_thread(self._log, note)
+        except Exception:
+            pass   # never crash the dashboard over a tracker notification
 
     # ── Actions ───────────────────────────────────────────────────────────────
 

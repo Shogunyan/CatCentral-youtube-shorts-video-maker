@@ -14,6 +14,7 @@ Candidate selection runs in three phases:
 import json
 import logging
 import random
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import yt_dlp
@@ -128,21 +129,55 @@ class VideoScraper:
     def mark_used(self, video_metas: list[dict]) -> None:
         """
         Record that these clips were used in a video.
-        Accepts full metadata dicts so URLs are preserved for potential reuse.
+        Accepts full metadata dicts so URLs and timestamps are preserved.
         """
+        now = datetime.now(timezone.utc).isoformat()
         for meta in video_metas:
             vid_id = meta.get("id", "")
             if not vid_id:
                 continue
             existing = self._used.get(vid_id, {})
             self._used[vid_id] = {
-                "count":      existing.get("count", 0) + 1,
-                "url":        meta.get("url") or existing.get("url", ""),
-                "platform":   meta.get("platform") or existing.get("platform", "unknown"),
-                "title":      meta.get("title") or existing.get("title", ""),
-                "view_count": meta.get("view_count") or existing.get("view_count", 0),
+                "count":        existing.get("count", 0) + 1,
+                "first_used_at": existing.get("first_used_at") or now,
+                "last_used_at":  now,
+                "url":          meta.get("url") or existing.get("url", ""),
+                "platform":     meta.get("platform") or existing.get("platform", "unknown"),
+                "title":        meta.get("title") or existing.get("title", ""),
+                "view_count":   meta.get("view_count") or existing.get("view_count", 0),
             }
         self._save_used()
+
+    def reset_expired_clips(self) -> int:
+        """
+        Reset the reuse counter for any clip whose first_used_at is older than
+        14 days (CLIP_RESET_DAYS).  Returns the number of clips reset.
+
+        Called automatically at the start of each pipeline run so the clip pool
+        keeps refreshing without manual intervention.
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(days=14)
+        reset = 0
+        for vid_id, data in self._used.items():
+            if data.get("count", 0) == 0:
+                continue
+            first_used = data.get("first_used_at")
+            if not first_used:
+                continue
+            try:
+                dt = datetime.fromisoformat(first_used)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                if dt <= cutoff:
+                    data["count"] = 0
+                    data["first_used_at"] = None
+                    reset += 1
+            except Exception:
+                pass
+        if reset:
+            self._save_used()
+            logger.info(f"Reset reuse counters for {reset} clip(s) (>14 days old)")
+        return reset
 
     def _is_used(self, vid_id: str) -> bool:
         """True if this clip has hit the reuse limit and should never appear again."""

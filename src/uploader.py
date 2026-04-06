@@ -22,7 +22,10 @@ from googleapiclient.http import MediaFileUpload
 
 logger = logging.getLogger(__name__)
 
-SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+SCOPES = [
+    "https://www.googleapis.com/auth/youtube.upload",
+    "https://www.googleapis.com/auth/youtube.readonly",   # needed for view-count checks
+]
 API_SERVICE_NAME = "youtube"
 API_VERSION = "v3"
 
@@ -157,6 +160,38 @@ class YouTubeUploader:
         except Exception as e:
             logger.error(f"Upload failed: {e}")
             return None
+
+    def get_video_stats(self, video_ids: list[str]) -> dict[str, int]:
+        """
+        Return {video_id: view_count} for the given list of YouTube video IDs.
+
+        Requires youtube.readonly scope.  If the stored token predates that
+        scope being added, this raises an HttpError 403 — callers should
+        catch it and continue without view counts.
+        """
+        if not video_ids:
+            return {}
+
+        result: dict[str, int] = {}
+        service = self._get_service()
+
+        # YouTube API accepts up to 50 IDs per request
+        for i in range(0, len(video_ids), 50):
+            batch = video_ids[i : i + 50]
+            try:
+                resp = service.videos().list(
+                    part="statistics",
+                    id=",".join(batch),
+                ).execute()
+                for item in resp.get("items", []):
+                    views = item.get("statistics", {}).get("viewCount", 0)
+                    result[item["id"]] = int(views)
+            except HttpError as e:
+                if e.resp.status == 403:
+                    raise   # let caller handle scope error
+                logger.warning(f"videos.list API error for batch: {e}")
+
+        return result
 
     def test_auth(self) -> bool:
         """Verify credentials work by fetching the channel list."""

@@ -32,6 +32,7 @@ from src.downloader import Downloader
 from src.scraper import VideoScraper
 from src.uploader import YouTubeUploader
 from src.video_editor import check_ffmpeg, create_ranking_video
+from src.video_tracker import VideoTracker
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,7 @@ class Pipeline:
         self.scraper = VideoScraper(config)
         self.downloader = Downloader(config)
         self.uploader = YouTubeUploader(config) if not dry_run else None
+        self.tracker = VideoTracker(config)
 
     # ── Reporter helper ───────────────────────────────────────────────────────
 
@@ -72,6 +74,12 @@ class Pipeline:
 
         self._report(1, f"🚀  {dry}Starting pipeline…",
                      f"Pipeline run {run_id} starting")
+
+        # ── 0. Housekeeping — reset expired clip counters ─────────────────────
+        reset_count = self.scraper.reset_expired_clips()
+        if reset_count:
+            self._report(2, "♻️  Clip counters reset",
+                         f"♻️  {reset_count} clip(s) recycled back into the pool (>14 days old)")
 
         # ── 1. Scrape ─────────────────────────────────────────────────────────
         self._report(5, "🔍  Scraping viral cat videos…",
@@ -212,12 +220,34 @@ class Pipeline:
 
         # ── Done ──────────────────────────────────────────────────────────────
         self.scraper.mark_used(used_metas)
+
+        # Record the upload so the tracker can manage the re-upload cycle
+        if not self.dry_run and video_id and video_id != "DRY_RUN":
+            self.tracker.record_upload(
+                youtube_id=video_id,
+                title=caption["title"],
+                clip_ids=[m["id"] for m in used_metas],
+                video_path=output_path,
+            )
+
         self._report(
             100,
             "✅  Done!  Video is live on YouTube.",
             f"https://www.youtube.com/shorts/{video_id}",
         )
         logger.info(f"Run {run_id} complete. video_id={video_id}")
+
+        # ── Post-run: check re-upload queue ───────────────────────────────────
+        if not self.dry_run and self.uploader:
+            try:
+                self.tracker.check_and_reupload(
+                    uploader=self.uploader,
+                    caption_gen=generate_caption,
+                    reporter=self._reporter,
+                )
+            except Exception as e:
+                logger.warning(f"Re-upload check failed (non-fatal): {e}")
+
         return True
 
 
