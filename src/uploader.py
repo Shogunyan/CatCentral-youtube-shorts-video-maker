@@ -34,14 +34,27 @@ def _is_wsl() -> bool:
 
 
 def _open_browser(url: str) -> None:
-    """Open a URL — uses cmd.exe on WSL so the Windows browser launches."""
+    """Open a URL — tries several methods for WSL, falls back to printing the URL."""
     if _is_wsl():
-        try:
-            subprocess.Popen(["cmd.exe", "/c", "start", "", url.replace("&", "^&")])
-            return
-        except Exception:
-            pass
-    webbrowser.open(url)
+        for cmd in (
+            ["explorer.exe", url],
+            ["wslview", url],
+            ["powershell.exe", "-Command", f'Start-Process "{url}"'],
+        ):
+            try:
+                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                print(f"\n[AUTH] Opening browser...\n  URL: {url}\n", flush=True)
+                return
+            except FileNotFoundError:
+                continue
+            except Exception:
+                continue
+    # Non-WSL or all WSL methods failed — try standard webbrowser
+    try:
+        webbrowser.open(url)
+    except Exception:
+        pass
+    print(f"\n[AUTH] Could not open browser automatically.\n  Open this URL manually:\n  {url}\n", flush=True)
 
 SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
