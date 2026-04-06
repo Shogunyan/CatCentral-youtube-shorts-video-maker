@@ -42,7 +42,7 @@ def _ffmpeg(*args, check=True) -> subprocess.CompletedProcess:
 
 def _escape_drawtext(text: str) -> str:
     """Escape special chars for ffmpeg drawtext filter."""
-    for ch in ("\\", ":", "'", "[", "]"):
+    for ch in ("\\", ":", "'", "[", "]", "%"):
         text = text.replace(ch, "\\" + ch)
     return text
 
@@ -110,6 +110,8 @@ def _process_clip(
         "-i", str(input_path),
         "-t", str(clip_duration),
         "-vf", vf,
+        "-map", "0:v:0",
+        "-map", "0:a:0?",   # optional: some clips may have no audio track
         "-c:v", VIDEO_CODEC,
         "-crf", VIDEO_CRF,
         "-preset", "fast",
@@ -243,7 +245,7 @@ def _blur_corner_watermarks(input_path: Path, output_path: Path) -> Path:
 
     # Build a split/blur/overlay chain for 4 corners
     vf = (
-        f"[in]split=5[base][c1][c2][c3][c4];"
+        f"[0:v]split=5[base][c1][c2][c3][c4];"
         f"[c1]crop={bw}:{bh}:0:0,gblur=sigma={blur_strength}[b1];"
         f"[c2]crop={bw}:{bh}:{TARGET_W - bw}:0,gblur=sigma={blur_strength}[b2];"
         f"[c3]crop={bw}:{bh}:0:{TARGET_H - bh},gblur=sigma={blur_strength}[b3];"
