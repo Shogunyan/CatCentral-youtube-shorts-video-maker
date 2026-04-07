@@ -337,7 +337,13 @@ class DashboardScreen(Screen):
 
     @work(thread=True)
     def _pipeline_worker(self) -> None:
-        from src.scheduler import Pipeline
+        import traceback
+        try:
+            from src.scheduler import Pipeline
+        except Exception as exc:
+            self.post_message(PipelineFinished(
+                success=False, detail=f"Import error: {exc}\n{traceback.format_exc()}"))
+            return
 
         def reporter(percent: float, action: str, log_msg: str = "") -> None:
             self.post_message(PipelineProgress(percent, action, log_msg))
@@ -347,7 +353,8 @@ class DashboardScreen(Screen):
             ok = pipeline.run()
             self.post_message(PipelineFinished(success=ok))
         except Exception as exc:
-            self.post_message(PipelineFinished(success=False, detail=str(exc)))
+            self.post_message(PipelineFinished(
+                success=False, detail=f"{exc}\n{traceback.format_exc()}"))
 
     @on(PipelineProgress)
     def _on_progress(self, msg: PipelineProgress) -> None:

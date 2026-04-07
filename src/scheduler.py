@@ -118,10 +118,14 @@ class Pipeline:
                     f"✓ Clip {len(downloaded)}/{n} saved  ({kb} KB)",
                 )
 
-        if len(downloaded) < n:
+        if len(downloaded) < 3:
             self._report(18, "❌  Not enough clips downloaded",
-                         f"Got {len(downloaded)}/{n} — aborting")
+                         f"Got {len(downloaded)} — need at least 3, aborting")
             return False
+
+        if len(downloaded) < n:
+            logger.info(f"Got {len(downloaded)}/{n} clips — proceeding with fewer")
+            n = len(downloaded)
 
         downloaded = downloaded[:n]
         random.shuffle(downloaded)
