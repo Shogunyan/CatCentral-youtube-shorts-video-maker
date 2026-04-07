@@ -9,6 +9,7 @@ Priority rules:
 import logging
 import re
 import shutil
+import subprocess
 from pathlib import Path
 
 import yt_dlp
@@ -17,6 +18,31 @@ logger = logging.getLogger(__name__)
 
 # Minimum acceptable clip duration in seconds
 MIN_DURATION = 4
+
+# Minimum source resolution — clips below this height are too pixelated
+# when upscaled to 1080×1920. 480p is the floor; 720p is ideal.
+MIN_CLIP_HEIGHT = 480
+
+
+def _probe_height(path: Path) -> int:
+    """Return the height of the first video stream, or 0 on failure."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=height",
+                "-of", "csv=p=0",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        val = result.stdout.strip()
+        return int(val) if val.isdigit() else 0
+    except Exception:
+        return 0
 
 
 class Downloader:
@@ -71,7 +97,15 @@ class Downloader:
 
             downloaded = self._find_existing(vid_id)
             if downloaded:
-                logger.info(f"  ✓ {downloaded.name} ({_fmt_size(downloaded)})")
+                h = _probe_height(downloaded)
+                if h and h < MIN_CLIP_HEIGHT:
+                    logger.warning(
+                        f"Clip too low-res ({h}p < {MIN_CLIP_HEIGHT}p), skipping {vid_id}"
+                    )
+                    self._cleanup(vid_id)
+                    return None
+                logger.info(f"  ✓ {downloaded.name} ({_fmt_size(downloaded)})"
+                            + (f"  [{h}p]" if h else ""))
                 return downloaded
             logger.warning(f"Download completed but file not found for {vid_id}")
             return None
@@ -119,7 +153,15 @@ class Downloader:
 
             downloaded = self._find_existing(vid_id)
             if downloaded:
-                logger.info(f"  ✓ {downloaded.name} ({_fmt_size(downloaded)})")
+                h = _probe_height(downloaded)
+                if h and h < MIN_CLIP_HEIGHT:
+                    logger.warning(
+                        f"Segment too low-res ({h}p < {MIN_CLIP_HEIGHT}p), skipping {vid_id}"
+                    )
+                    self._cleanup(vid_id)
+                    return None
+                logger.info(f"  ✓ {downloaded.name} ({_fmt_size(downloaded)})"
+                            + (f"  [{h}p]" if h else ""))
                 return downloaded
             logger.warning(f"Segment download completed but file not found for {vid_id}")
             return None
