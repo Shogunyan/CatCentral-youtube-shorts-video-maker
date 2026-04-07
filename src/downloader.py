@@ -103,6 +103,7 @@ class Downloader:
             "quiet": True,
             "no_warnings": True,
             "ignoreerrors": False,
+            "nocheckcertificate": True,
             "merge_output_format": "mp4",
             "postprocessors": [
                 {

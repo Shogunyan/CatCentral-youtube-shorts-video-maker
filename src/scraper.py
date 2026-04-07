@@ -196,6 +196,7 @@ class VideoScraper:
             "no_warnings": True,
             "playlistend": playlist_end,
             "ignoreerrors": True,
+            "nocheckcertificate": True,
         }
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
