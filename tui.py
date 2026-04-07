@@ -329,17 +329,26 @@ class DashboardScreen(Screen):
     # ── Pipeline ──────────────────────────────────────────────────────────────
 
     def _start_pipeline(self) -> None:
+        self._log(f"DEBUG: _start_pipeline called, _running={self._running}")
         if self._running:
+            self._log("DEBUG: already running, returning")
             return
-        self._running = True
-        btn = self.query_one("#btn-run", Button)
-        btn.disabled = True
-        btn.label = "⏳  Running…"
-        self.query_one("#pbar", ProgressBar).update(progress=0)
-        self._update_action("🚀  Starting pipeline…")
-        self._log("─" * 48)
-        self._log(f"Pipeline started at {_ts()}")
-        self._pipeline_worker()
+        try:
+            self._running = True
+            btn = self.query_one("#btn-run", Button)
+            btn.disabled = True
+            btn.label = "⏳  Running…"
+            self.query_one("#pbar", ProgressBar).update(progress=0)
+            self._update_action("🚀  Starting pipeline…")
+            self._log("─" * 48)
+            self._log(f"Pipeline started at {_ts()}")
+            self._log("DEBUG: about to call _pipeline_worker")
+            self._pipeline_worker()
+            self._log("DEBUG: _pipeline_worker called OK")
+        except Exception as e:
+            self._log(f"DEBUG: _start_pipeline CRASHED: {e}")
+            import traceback
+            self._log(traceback.format_exc())
 
     @work(thread=True)
     def _pipeline_worker(self) -> None:
