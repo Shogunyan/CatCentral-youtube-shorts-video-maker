@@ -431,11 +431,11 @@ class VideoScraper:
                     "url":        url,
                     "title":      label or comp_title[:20],
                     "start_time": start,
-                    "end_time":   min(end, start + 25),
+                    "end_time":   min(end, start + SEGMENT_TARGET_SECS),
                     "platform":   "youtube",
                     "view_count": view_count,
                     "like_count": info.get("like_count") or 0,
-                    "duration":   min(seg_len, 25),
+                    "duration":   min(seg_len, SEGMENT_TARGET_SECS),
                 })
         else:
             if not duration or duration < 30:

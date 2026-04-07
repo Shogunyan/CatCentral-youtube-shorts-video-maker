@@ -77,11 +77,26 @@ def _ts() -> str:
 class SetupScreen(Screen):
     """Credential input form + YouTube OAuth flow."""
 
-    BINDINGS = [Binding("escape", "app.pop_screen", "Back", show=False)]
+    BINDINGS = [Binding("escape", "go_back", "Back", show=True)]
+
+    def __init__(self, as_settings: bool = False) -> None:
+        super().__init__()
+        self._as_settings = as_settings  # True when opened from the dashboard
+
+    def action_go_back(self) -> None:
+        """Escape / Back — only navigate away if there's a dashboard to return to."""
+        if self._as_settings:
+            self.app.pop_screen()
+
+    @on(Button.Pressed, "#btn-back")
+    def on_back(self) -> None:
+        self.app.pop_screen()
 
     def compose(self) -> ComposeResult:
         yield Header()
         with Container(id="setup-wrap"):
+            if self._as_settings:
+                yield Button("← Back to Dashboard", id="btn-back", variant="default")
             yield Static("🐱  CatCentral — Setup", id="setup-title")
             yield Rule()
 
@@ -222,7 +237,10 @@ class SetupScreen(Screen):
 
     def _go_dashboard(self) -> None:
         self.app.pop_screen()
-        self.app.push_screen(DashboardScreen())
+        # Only push a new DashboardScreen on first-run; if one already exists
+        # below (user opened Settings from the dashboard), don't stack another.
+        if not isinstance(self.app.screen, DashboardScreen):
+            self.app.push_screen(DashboardScreen())
 
 
 # ── Dashboard Screen ──────────────────────────────────────────────────────────
@@ -310,7 +328,7 @@ class DashboardScreen(Screen):
         self._toggle_scheduler()
 
     def action_open_settings(self) -> None:
-        self.app.push_screen(SetupScreen())
+        self.app.push_screen(SetupScreen(as_settings=True))
 
     # ── Button handlers ───────────────────────────────────────────────────────
 
@@ -324,7 +342,7 @@ class DashboardScreen(Screen):
 
     @on(Button.Pressed, "#btn-settings")
     def _on_settings(self) -> None:
-        self.app.push_screen(SetupScreen())
+        self.app.push_screen(SetupScreen(as_settings=True))
 
     # ── Pipeline ──────────────────────────────────────────────────────────────
 
@@ -340,9 +358,7 @@ class DashboardScreen(Screen):
             self._update_action("🚀  Starting pipeline…")
             self._log("─" * 48)
             self._log(f"Pipeline started at {_ts()}")
-            self._log("DEBUG: about to call _pipeline_worker")
             self._pipeline_worker()
-            self._log("DEBUG: _pipeline_worker called OK")
         except Exception as e:
             self._set_running(False)
             self._log(f"❌ Startup error: {e}")
@@ -556,6 +572,14 @@ Input:focus {
 
 .status-error {
     color: #f85149;
+}
+
+Button#btn-back {
+    width: 100%;
+    margin: 0 0 1 0;
+    background: #21262d;
+    color: #8b949e;
+    border: tall #30363d;
 }
 
 Button#btn-auth {
