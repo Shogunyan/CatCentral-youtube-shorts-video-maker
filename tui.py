@@ -277,8 +277,6 @@ class DashboardScreen(Screen):
 
     def on_mount(self) -> None:
         from config import Config
-        self._running = False
-        self._sched_active = False
         self._cfg = Config()
         self._refresh_sched_label()
         self._log("CatCentral ready.  Press  R  or click  Run Now  to start.")
@@ -394,6 +392,12 @@ class DashboardScreen(Screen):
         except Exception as exc:
             _log_safe(f"PIPELINE CRASHED: {exc}\n{traceback.format_exc()}")
             _finish(False, f"{exc}")
+        finally:
+            # Hard guarantee: always reset _running even if _finish failed
+            try:
+                self.app.call_from_thread(setattr, self, "_running", False)
+            except Exception:
+                pass
 
     def _on_progress_direct(self, percent: float, action: str, log_msg: str = "") -> None:
         """Called from worker thread via call_from_thread."""
