@@ -83,6 +83,93 @@ _FONT_B = f":fontfile={FONT_BUBBLY}" if FONT_BUBBLY else ""
 _FONT_P = f":fontfile={FONT_PLAIN}"  if FONT_PLAIN  else ""
 
 
+# ── Sound effects ─────────────────────────────────────────────────────────────
+
+_WOOSH_PATH = Path(__file__).parent.parent / "assets" / "sfx" / "woosh.mp3"
+
+
+def _get_woosh() -> Path | None:
+    """Return path to the woosh sound, generating it with ffmpeg if needed."""
+    if _WOOSH_PATH.exists():
+        return _WOOSH_PATH
+    try:
+        _WOOSH_PATH.parent.mkdir(parents=True, exist_ok=True)
+        # Rising chirp: frequency sweeps from ~120 Hz to ~1800 Hz over 0.45s
+        # Phase formula: sin(2π·(f0·t + (f1-f0)/(2T)·t²))
+        # (f1-f0)/(2T) = (1680)/(0.9) ≈ 1867
+        subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi",
+                "-i", (
+                    "aevalsrc="
+                    "0.45*sin(6.283*(120*t+1867*t*t))"
+                    "+0.2*sin(6.283*(240*t+3733*t*t))"
+                    ":s=44100:c=stereo:d=0.45"
+                ),
+                "-af", "afade=t=in:d=0.02,afade=t=out:st=0.36:d=0.09,volume=2.5",
+                str(_WOOSH_PATH),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        logger.info(f"Generated woosh SFX → {_WOOSH_PATH}")
+        return _WOOSH_PATH
+    except Exception as e:
+        logger.warning(f"Could not generate woosh sound: {e}")
+        return None
+
+
+def _has_audio(video_path: Path) -> bool:
+    """Return True if the video file has at least one audio stream."""
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "quiet",
+            "-select_streams", "a:0",
+            "-show_entries", "stream=codec_type",
+            "-of", "csv=p=0",
+            str(video_path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip() == "audio"
+
+
+def _add_woosh_to_clip(
+    video_path: Path,
+    woosh_path: Path,
+    output_path: Path,
+) -> Path:
+    """
+    Mix a woosh sound effect at the very start of a clip.
+    Handles clips that have no original audio track.
+    """
+    if _has_audio(video_path):
+        audio_fc = (
+            "[0:a]volume=1.0[orig];"
+            "[1:a]volume=2.0[w];"
+            "[orig][w]amix=inputs=2:duration=first:normalize=0[a]"
+        )
+    else:
+        audio_fc = "[1:a]volume=2.0[a]"
+
+    _ffmpeg(
+        "-i", str(video_path),
+        "-i", str(woosh_path),
+        "-filter_complex", audio_fc,
+        "-map", "0:v",
+        "-map", "[a]",
+        "-c:v", "copy",
+        "-c:a", AUDIO_CODEC,
+        "-b:a", AUDIO_BITRATE,
+        "-ar", "44100",
+        "-ac", "2",
+        str(output_path),
+    )
+    return output_path
+
+
 # ── Ranking overlay ───────────────────────────────────────────────────────────
 
 def _make_short_label(title: str) -> str:
@@ -247,12 +334,22 @@ def _concat_clips(clip_paths: list[Path], output_path: Path) -> Path:
     return output_path
 
 
-# ── Watermark ─────────────────────────────────────────────────────────────────
+# ── Watermark + popups ────────────────────────────────────────────────────────
 
 def _add_watermark(input_path: Path, output_path: Path, watermark_text: str) -> Path:
-    """Burn a moving semi-transparent @CatCentral watermark into the video."""
+    """
+    Burn a moving @CatCentral watermark AND a like/subscribe popup into
+    the video in a single ffmpeg pass.
+
+    Like & Subscribe badge:
+      • Red pill-shaped box, centred near the bottom
+      • Appears 3–6 seconds in (during the first clip)
+      • Short enough to be non-annoying, long enough to register
+    """
     wm  = _escape_drawtext(watermark_text)
     pad = 55
+
+    # Moving watermark
     x_expr = (
         f"if(eq(mod(floor(t/12),4),0),{pad},"
         f"if(eq(mod(floor(t/12),4),1),w-tw-{pad},"
@@ -271,9 +368,35 @@ def _add_watermark(input_path: Path, output_path: Path, watermark_text: str) -> 
         ":borderw=2:bordercolor=black@0.6"
         f":x='{x_expr}':y='{y_expr}'"
     )
+
+    # Like & subscribe popup badge — shows at t=3..6
+    popup_box = (
+        "drawbox"
+        ":x=(iw-520)/2:y=ih-210:w=520:h=88"
+        ":color=#EE1111@0.88:t=fill"
+        ":enable='between(t,3,6)'"
+    )
+    popup_text = (
+        f"drawtext=text='LIKE \\& SUBSCRIBE'{_FONT_B}"
+        ":fontsize=40:fontcolor=white"
+        ":borderw=3:bordercolor=black@0.8"
+        ":x=(w-tw)/2:y=ih-192"
+        ":enable='between(t,3,6)'"
+    )
+    # Small bell/notify hint below
+    popup_hint = (
+        f"drawtext=text='for more cat videos'{_FONT_P}"
+        ":fontsize=24:fontcolor=white@0.8"
+        ":borderw=2:bordercolor=black@0.6"
+        ":x=(w-tw)/2:y=ih-152"
+        ":enable='between(t,3,6)'"
+    )
+
+    vf = f"{wm_filter},{popup_box},{popup_text},{popup_hint}"
+
     _ffmpeg(
         "-i", str(input_path),
-        "-vf", wm_filter,
+        "-vf", vf,
         "-c:v", VIDEO_CODEC, "-crf", VIDEO_CRF, "-preset", "fast",
         "-c:a", "copy",
         "-movflags", "+faststart",
@@ -432,6 +555,11 @@ def create_ranking_video(
         tmp = Path(tmpdir)
         processed: list[Path] = []
 
+        # Pre-load woosh sound (generated once, reused for every transition)
+        woosh = _get_woosh()
+        if woosh:
+            _step("Woosh SFX ready…")
+
         # ── 1. Process each clip ─────────────────────────────────────────────
         for idx, src in enumerate(clip_paths):
             rank     = n - idx   # n=5,idx=0 → rank 5 first; idx=4 → rank 1 last
@@ -456,7 +584,18 @@ def create_ranking_video(
                 current_idx=idx,
                 n=n,
             )
-            processed.append(step1)
+
+            # Add woosh at the start of every clip (signals "new clip incoming")
+            if woosh:
+                woosh_out = tmp / f"woosh_rank{rank}.mp4"
+                try:
+                    _add_woosh_to_clip(step1, woosh, woosh_out)
+                    processed.append(woosh_out)
+                except Exception as e:
+                    logger.warning(f"Woosh mix failed for rank {rank}: {e}")
+                    processed.append(step1)
+            else:
+                processed.append(step1)
 
         # ── 2. Concatenate ───────────────────────────────────────────────────
         _step("Concatenating all clips…")

@@ -12,12 +12,45 @@ Strategy:
 import json
 import logging
 import random
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import yt_dlp
 
 logger = logging.getLogger(__name__)
+
+# ── Comment timestamp parsing ─────────────────────────────────────────────────
+# Matches timestamps like 0:45, 1:23, 12:34, 1:23:45 in comment text
+_TS_RE = re.compile(r'\b(\d{1,2}):(\d{2})(?::(\d{2}))?\b')
+
+
+def _parse_comment_timestamps(
+    comments: list[dict], duration: float
+) -> list[float]:
+    """
+    Extract and rank timestamps from video comments.
+
+    Comments like "0:45 😂" or "1:23 this one got me" are crowd-sourced
+    markers for the funniest moments. Returns timestamps sorted by how many
+    comments mention that time range (most popular first).
+    """
+    counts: dict[int, int] = {}
+    for c in comments:
+        text = (c.get("text") or "") + " " + (c.get("parent") or "")
+        for m in _TS_RE.finditer(text):
+            a, b = int(m.group(1)), int(m.group(2))
+            third = m.group(3)
+            total = (a * 3600 + b * 60 + int(third)) if third else (a * 60 + b)
+            # Must be within the video and past the first 5 seconds
+            if 5 <= total <= max(5, duration - 5):
+                bucket = int((total // 4) * 4)   # 4-second buckets
+                counts[bucket] = counts.get(bucket, 0) + 1
+
+    # Only keep timestamps mentioned at least twice (avoid one-off noise)
+    popular = [(ts, cnt) for ts, cnt in counts.items() if cnt >= 2]
+    popular.sort(key=lambda x: x[1], reverse=True)
+    return [float(ts) for ts, _ in popular]
 
 MAX_CLIP_REUSE = 2
 
@@ -183,6 +216,44 @@ class VideoScraper:
             logger.debug(f"Failed to get info for {url}: {e}")
             return None
 
+    def _get_comment_timestamps(self, url: str, duration: float) -> list[float]:
+        """
+        Scrape the top comments of a YouTube video and extract mentioned
+        timestamps. Returns a list of seconds sorted by popularity.
+
+        This leverages crowd wisdom: if many viewers timestamp "1:23 💀", that
+        moment is almost certainly the funniest part of the video.
+        """
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "ignoreerrors": True,
+            "nocheckcertificate": True,
+            "skip_download": True,
+            "getcomments": True,
+            "extractor_args": {
+                "youtube": {
+                    "comment_sort": ["top"],
+                    "max_comments": ["120"],
+                }
+            },
+        }
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+            if not info:
+                return []
+            comments = info.get("comments") or []
+            timestamps = _parse_comment_timestamps(comments, duration)
+            logger.info(
+                f"  Comment timestamps: {len(timestamps)} popular moments "
+                f"from {len(comments)} comments"
+            )
+            return timestamps
+        except Exception as e:
+            logger.debug(f"Comment fetch failed for {url}: {e}")
+            return []
+
     # ── Compilation-based clip extraction ─────────────────────────────────────
 
     def _search_compilations(self, query: str, max_results: int = 6) -> list[dict]:
@@ -260,30 +331,66 @@ class VideoScraper:
         else:
             if not duration or duration < 30:
                 return []
-            logger.info(f"  No chapters — splitting {duration:.0f}s into segments")
-            # Skip first/last 10s (intro/outro)
-            usable_start = 10.0
-            usable_end = duration - 10.0
-            usable_len = usable_end - usable_start
-            n_segs = min(12, max(2, int(usable_len / SEGMENT_TARGET_SECS)))
-            seg_len = usable_len / n_segs
-            for i in range(n_segs):
-                start = usable_start + i * seg_len
-                end = start + min(seg_len, SEGMENT_TARGET_SECS)
-                clip_id = f"{vid_id}_{int(start)}"
-                if self._is_used(clip_id):
-                    continue
-                clips.append({
-                    "id":         clip_id,
-                    "url":        url,
-                    "title":      comp_title[:20],
-                    "start_time": start,
-                    "end_time":   end,
-                    "platform":   "youtube",
-                    "view_count": view_count,
-                    "like_count": 0,
-                    "duration":   end - start,
-                })
+
+            # Try comment timestamps first — crowd-sourced funny moment detection
+            logger.info(f"  No chapters — scraping comments for timestamps…")
+            comment_ts = self._get_comment_timestamps(url, duration)
+
+            if comment_ts:
+                # Use the most-mentioned timestamps as clip start points.
+                # Spread them out so clips don't overlap (min 8s apart).
+                selected: list[float] = []
+                for ts in comment_ts:
+                    if all(abs(ts - s) >= 8 for s in selected):
+                        selected.append(ts)
+                    if len(selected) >= 12:
+                        break
+                logger.info(
+                    f"  Using {len(selected)} comment-voted timestamps as clip starts"
+                )
+                for ts in selected:
+                    start = ts
+                    end = min(start + SEGMENT_TARGET_SECS, duration - 2)
+                    clip_id = f"{vid_id}_{int(start)}"
+                    if self._is_used(clip_id):
+                        continue
+                    clips.append({
+                        "id":         clip_id,
+                        "url":        url,
+                        "title":      comp_title[:20],
+                        "start_time": start,
+                        "end_time":   end,
+                        "platform":   "youtube",
+                        "view_count": view_count,
+                        "like_count": 0,
+                        "duration":   end - start,
+                        "_comment_voted": True,
+                    })
+            else:
+                # Fallback: split evenly (skip first/last 10s intro/outro)
+                logger.info(f"  No comments — splitting {duration:.0f}s into segments")
+                usable_start = 10.0
+                usable_end   = duration - 10.0
+                usable_len   = usable_end - usable_start
+                n_segs = min(12, max(2, int(usable_len / SEGMENT_TARGET_SECS)))
+                seg_len = usable_len / n_segs
+                for i in range(n_segs):
+                    start = usable_start + i * seg_len
+                    end   = start + min(seg_len, SEGMENT_TARGET_SECS)
+                    clip_id = f"{vid_id}_{int(start)}"
+                    if self._is_used(clip_id):
+                        continue
+                    clips.append({
+                        "id":         clip_id,
+                        "url":        url,
+                        "title":      comp_title[:20],
+                        "start_time": start,
+                        "end_time":   end,
+                        "platform":   "youtube",
+                        "view_count": view_count,
+                        "like_count": 0,
+                        "duration":   end - start,
+                    })
 
         return clips
 
