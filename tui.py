@@ -237,9 +237,8 @@ class DashboardScreen(Screen):
         Binding("q", "app.quit", "Quit"),
     ]
 
-    # Plain instance vars — reactive was causing _running to be True on init
-    _running = False
-    _sched_active = False
+    _running: reactive[bool] = reactive(False)
+    _sched_active: reactive[bool] = reactive(False)
 
     def compose(self) -> ComposeResult:
         yield Header()
