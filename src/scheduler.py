@@ -91,7 +91,7 @@ class Pipeline:
         self._report(5, "🔍  Scraping viral cat videos…",
                      f"Searching for clips matching: {title}")
         candidates = self.scraper.get_candidates(
-            want=n * 3,
+            want=n * 5,
             yt_queries=caption.get("yt_queries"),
             tt_hashtags=caption.get("tt_hashtags"),
         )
@@ -128,14 +128,10 @@ class Pipeline:
                     f"✓ Clip {len(downloaded)}/{n} saved  ({kb} KB)",
                 )
 
-        if len(downloaded) < 3:
-            self._report(18, "❌  Not enough clips downloaded",
-                         f"Got {len(downloaded)} — need at least 3, aborting")
-            return False
-
         if len(downloaded) < n:
-            logger.info(f"Got {len(downloaded)}/{n} clips — proceeding with fewer")
-            n = len(downloaded)
+            self._report(18, "❌  Not enough clips downloaded",
+                         f"Got {len(downloaded)}/{n} — need exactly {n}, aborting")
+            return False
 
         downloaded = downloaded[:n]
         random.shuffle(downloaded)
