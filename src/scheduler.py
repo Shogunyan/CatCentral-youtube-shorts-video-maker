@@ -40,6 +40,16 @@ logger = logging.getLogger(__name__)
 _NOOP: Callable = lambda pct, action, log="": None
 
 
+def _make_clip_label(title: str) -> str:
+    """Turn a clip/chapter title into a short punchy ALL-CAPS label (≤16 chars)."""
+    import re
+    label = re.sub(r"#\w+", "", title).strip()
+    label = re.sub(r"https?://\S+", "", label).strip()
+    words = label.split()[:4]
+    result = " ".join(words)[:16]
+    return result.upper() if result else "CAT CLIP"
+
+
 class Pipeline:
     def __init__(
         self,
@@ -139,37 +149,17 @@ class Pipeline:
         clip_platforms = [m.get("platform", "unknown") for m, _ in downloaded]
         used_metas = [m for m, _ in downloaded]
 
-        # ── 3. Caption already generated above (before scraping) ────────────
-        self._report(46, "✏  Caption ready",
-                     f"Title: {title}")
-
-        # ── 3b. TTS voiceover ─────────────────────────────────────────────────
-        tts_audio = None
-        tts_tmp: Path | None = None
-        if self.config.tts_enabled and not self.dry_run:
-            self._report(49, "🎙  Generating AI voiceover…",
-                         f"Using voice: {self.config.tts_voice}")
-            try:
-                from src.tts import TTSGenerator
-                tts_tmp = self.config.data_dir / f"tts_{run_id}"
-                tts_gen = TTSGenerator(voice=self.config.tts_voice)
-                tts_audio = tts_gen.generate_all(n, tts_tmp)
-                self._report(50, "🎙  Voiceover ready", "AI voice clips generated")
-            except Exception as e:
-                self._report(50, "🎙  Voiceover skipped",
-                             f"TTS failed (continuing without voice): {e}")
-                logger.warning(f"TTS generation failed: {e}")
-                tts_audio = None
+        # ── 3. Generate short clip labels for the ranking overlay ────────────
+        clip_labels = [_make_clip_label(m.get("title", "")) for m, _ in downloaded]
+        self._report(46, "✏  Caption ready", f"Title: {title}")
 
         # ── 4. Build video ────────────────────────────────────────────────────
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = self.config.processed_dir / f"ranking_{ts}_{run_id}.mp4"
 
-        # Video editor reports each step via this callback
+        # n clips × up to 2 steps (blur + process) + concat + watermark
+        total_video_steps = n * 2 + 2
         video_step = [0]
-        # blur + process + optional tts mix per clip + title card + concat + watermark
-        tts_mix_steps = n if tts_audio else 0
-        total_video_steps = n * 2 + tts_mix_steps + 3
 
         def on_video_step(step_msg: str) -> None:
             video_step[0] += 1
@@ -188,7 +178,7 @@ class Pipeline:
                     config=self.config,
                     clip_platforms=clip_platforms,
                     on_progress=on_video_step,
-                    tts_audio=tts_audio,
+                    clip_labels=clip_labels,
                 )
             else:
                 logger.info(f"[DRY RUN] Would write video to {output_path}")
@@ -200,10 +190,6 @@ class Pipeline:
             self._report(52, "❌  Video creation failed", str(e))
             logger.error(f"Video creation failed: {e}", exc_info=True)
             return False
-        finally:
-            # Clean up TTS temp files regardless of success/failure
-            if tts_tmp and tts_tmp.exists():
-                shutil.rmtree(tts_tmp, ignore_errors=True)
 
         # ── 5. Upload ─────────────────────────────────────────────────────────
         self._report(90, "📤  Uploading to YouTube…",

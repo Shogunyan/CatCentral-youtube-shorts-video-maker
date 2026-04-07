@@ -30,13 +30,24 @@ class Downloader:
     def download(self, video: dict) -> Path | None:
         """
         Download a single video dict (from scraper) to disk.
+        If the dict contains start_time/end_time, only that segment is downloaded.
         Returns the local file path on success, None on failure.
         """
+        start_time = video.get("start_time")
+        end_time = video.get("end_time")
+
+        if start_time is not None and end_time is not None:
+            return self._download_segment(
+                video, float(start_time), float(end_time)
+            )
+        return self._download_full(video)
+
+    def _download_full(self, video: dict) -> Path | None:
+        """Download a complete video file."""
         platform = video.get("platform", "unknown")
         url = video["url"]
         vid_id = self._sanitize_id(video["id"])
 
-        # Check if already downloaded
         existing = self._find_existing(vid_id)
         if existing:
             logger.debug(f"Already downloaded: {existing.name}")
@@ -52,8 +63,6 @@ class Downloader:
                 if info is None:
                     logger.warning(f"yt-dlp returned no info for {url}")
                     return None
-
-                # Validate duration
                 duration = info.get("duration") or 0
                 if duration and duration < MIN_DURATION:
                     logger.warning(f"Clip too short ({duration}s), skipping {vid_id}")
@@ -64,9 +73,8 @@ class Downloader:
             if downloaded:
                 logger.info(f"  ✓ {downloaded.name} ({_fmt_size(downloaded)})")
                 return downloaded
-            else:
-                logger.warning(f"Download completed but file not found for {vid_id}")
-                return None
+            logger.warning(f"Download completed but file not found for {vid_id}")
+            return None
 
         except yt_dlp.utils.DownloadError as e:
             logger.warning(f"Download failed for {url}: {e}")
@@ -74,6 +82,54 @@ class Downloader:
             return None
         except Exception as e:
             logger.error(f"Unexpected error downloading {url}: {e}")
+            self._cleanup(vid_id)
+            return None
+
+    def _download_segment(
+        self, video: dict, start: float, end: float
+    ) -> Path | None:
+        """Download a specific time range (segment) from a longer video."""
+        platform = video.get("platform", "youtube")
+        url = video["url"]
+        vid_id = self._sanitize_id(video["id"])
+
+        existing = self._find_existing(vid_id)
+        if existing:
+            logger.debug(f"Already downloaded: {existing.name}")
+            return existing
+
+        out_template = str(self.out_dir / f"{vid_id}.%(ext)s")
+        opts = self._build_ydl_opts(platform, out_template)
+        # Download only the specified time range
+        opts["download_ranges"] = yt_dlp.utils.download_range_func(
+            chapters=None,
+            ranges=[(start, end)],
+        )
+        opts["force_keyframes_at_cuts"] = True
+
+        logger.info(
+            f"Downloading segment {vid_id} [{start:.1f}s – {end:.1f}s] …"
+        )
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                if info is None:
+                    logger.warning(f"yt-dlp returned no info for {url}")
+                    return None
+
+            downloaded = self._find_existing(vid_id)
+            if downloaded:
+                logger.info(f"  ✓ {downloaded.name} ({_fmt_size(downloaded)})")
+                return downloaded
+            logger.warning(f"Segment download completed but file not found for {vid_id}")
+            return None
+
+        except yt_dlp.utils.DownloadError as e:
+            logger.warning(f"Segment download failed for {url} [{start}–{end}]: {e}")
+            self._cleanup(vid_id)
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error downloading segment {url}: {e}")
             self._cleanup(vid_id)
             return None
 
