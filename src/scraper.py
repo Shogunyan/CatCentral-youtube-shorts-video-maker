@@ -54,40 +54,51 @@ def _parse_comment_timestamps(
 
 MAX_CLIP_REUSE = 2
 
-# Target length (seconds) for each extracted segment when no chapters exist
-SEGMENT_TARGET_SECS = 18
+# Max seconds per compilation segment — must stay close to clip_duration (10s)
+# so one segment = one cat moment, not two cats crammed together.
+SEGMENT_TARGET_SECS = 11
 
-# ── Compilation search queries ─────────────────────────────────────────────────
-# These target compilation-style videos that aggregate many individual cat clips.
-COMPILATION_QUERIES = [
-    "funny cat tiktok compilation 2025",
-    "viral cat moments compilation",
-    "hilarious cat compilation no commentary",
-    "cats being cats tiktok compilation",
-    "best cat videos compilation 2025",
-    "funny cats tiktok viral compilation",
-    "cat fails funny compilation 2024",
-    "tiktok cats funny compilation",
-    "cats going crazy funny compilation",
-    "cute funny cat moments compilation",
-    "funny cat video compilation 2025",
-    "viral cats funny compilation",
-    "daily dose of internet cats",
-    "funniest cat clips compilation 2024",
+# ── Primary: individual short viral cat clips ─────────────────────────────────
+# Short individual videos (5–60s) where the WHOLE clip IS the funny moment.
+# No slicing needed. Great for iconic memes from 2017-2022.
+VIRAL_CAT_QUERIES = [
+    # Classic/iconic meme-era searches
+    "funny cat video 2019",
+    "funny cat video 2018",
+    "viral cat video 2017",
+    "classic funny cat meme original",
+    "iconic cat video",
+    "viral cat moment original",
+    # Specific behaviours that appear in every ranking video
+    "cat scared funny original video",
+    "cat yelling funny video",
+    "cat making weird noise funny",
+    "cat jump scare funny",
+    "cat obsessed funny video",
+    "cat zoomies crazy funny",
+    "cat knocking things off table funny",
+    "cat fights reflection mirror funny",
+    "cat attacks owner funny",
+    "cat stuck in box funny",
+    "cat refuses to move funny",
+    "cat falls off counter funny",
+    "cat dramatically rolls over",
+    "cat surprised reaction funny",
+    "cat hissing funny",
+    "cat chirping at birds funny",
+    "cat biscuits funny",
 ]
 
-# ── Fallback: direct individual clip search ───────────────────────────────────
-INDIVIDUAL_QUERIES = [
-    "funny cat video",
-    "hilarious cat moment",
-    "cat caught on camera funny",
-    "cats being silly funny",
-    "funny cat reaction",
-    "cat zoomies funny",
-    "cats knocking things off",
-    "cats being weird funny",
-    "cat doing something funny",
-    "cat attack funny",
+# ── Secondary: compilation extraction ────────────────────────────────────────
+# Used only if individual search doesn't find enough fresh clips.
+COMPILATION_QUERIES = [
+    "funny cat tiktok compilation 2025",
+    "viral cat moments compilation 2024",
+    "best cat clips compilation 2024",
+    "funniest cats compilation no commentary",
+    "cats being cats tiktok compilation",
+    "cat fails funny compilation",
+    "daily dose of internet cats",
 ]
 
 
@@ -428,16 +439,17 @@ class VideoScraper:
         self,
         queries: list[str] | None = None,
     ) -> list[dict]:
-        """Fallback: search for individual short viral cat clips."""
+        """
+        Search for individual short viral cat clips.
+
+        These are complete videos (5–60s) where the whole clip is the funny
+        moment — no slicing needed and no risk of grabbing two cats in one slot.
+        """
         all_videos: list[dict] = []
-        q_list = queries or random.sample(
-            INDIVIDUAL_QUERIES, min(4, len(INDIVIDUAL_QUERIES))
-        )
+        q_list = queries or random.sample(VIRAL_CAT_QUERIES, min(8, len(VIRAL_CAT_QUERIES)))
         for q in q_list:
             try:
-                entries = self._ydl_extract_flat(
-                    f"ytsearch15:{q}", playlist_end=15
-                )
+                entries = self._ydl_extract_flat(f"ytsearch20:{q}", playlist_end=20)
                 for e in entries:
                     if not e:
                         continue
@@ -445,7 +457,8 @@ class VideoScraper:
                     if not vid_id or self._is_used(vid_id):
                         continue
                     duration = e.get("duration") or 0
-                    if duration and duration > 90:
+                    # Keep short individual clips only (whole video = the moment)
+                    if duration and duration > 60:
                         continue
                     title = e.get("title", "")
                     if _is_unwanted(title):
@@ -462,7 +475,7 @@ class VideoScraper:
                         "duration":   duration,
                     })
             except Exception as e:
-                logger.warning(f"Individual fallback query failed '{q}': {e}")
+                logger.warning(f"Individual clip query failed '{q}': {e}")
         return sorted(all_videos, key=lambda x: x["view_count"], reverse=True)
 
     def _get_reusable_candidates(self) -> list[dict]:
@@ -508,26 +521,28 @@ class VideoScraper:
                     out.append(v)
             return out
 
-        # Build theme-matched compilation queries if available
-        comp_queries = None
-        if yt_queries:
-            comp_queries = [f"{q} compilation" for q in yt_queries[:3]]
+        # Phase 1: Individual short viral clips (primary)
+        # These are complete 5–60s videos where the whole clip = the funny moment.
+        # Use theme queries + the broad VIRAL_CAT_QUERIES pool.
+        ind_queries = list(yt_queries or []) + random.sample(
+            VIRAL_CAT_QUERIES, min(8, len(VIRAL_CAT_QUERIES))
+        )
+        logger.info("Phase 1: Searching for individual viral cat clips…")
+        ind = _dedup(self._scrape_individual_fallback(queries=ind_queries))
+        fresh = [v for v in ind if self._use_count(v["id"]) == 0]
+        logger.info(f"Phase 1: {len(fresh)} fresh individual clips found")
 
-        # Phase 1: Compilation-based extraction
-        logger.info("Phase 1: Extracting clips from compilations…")
-        raw = self._scrape_compilations(queries=comp_queries, want=want)
-        pool = _dedup(raw)
-        fresh = [v for v in pool if self._use_count(v["id"]) == 0]
-        logger.info(f"Phase 1: {len(fresh)} fresh clips from compilations")
-
-        # Phase 2: Individual clip fallback
+        # Phase 2: Compilation extraction fallback
         if len(fresh) < want:
             need = want - len(fresh)
-            logger.info(f"Phase 2: Need {need} more — searching individual clips…")
-            ind = _dedup(self._scrape_individual_fallback(queries=yt_queries))
-            fresh_ind = [v for v in ind if self._use_count(v["id"]) == 0]
-            logger.info(f"Phase 2: {len(fresh_ind)} fresh individual clips")
-            all_fresh = _dedup(fresh + fresh_ind)
+            logger.info(f"Phase 2: Need {need} more — extracting from compilations…")
+            comp_queries = None
+            if yt_queries:
+                comp_queries = [f"{q} compilation" for q in yt_queries[:3]]
+            raw = self._scrape_compilations(queries=comp_queries, want=need)
+            fresh_comp = [v for v in _dedup(raw) if self._use_count(v["id"]) == 0]
+            logger.info(f"Phase 2: {len(fresh_comp)} fresh compilation clips")
+            all_fresh = _dedup(fresh + fresh_comp)
         else:
             all_fresh = fresh
 

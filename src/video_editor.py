@@ -27,7 +27,7 @@ FPS = 30
 VIDEO_CODEC = "libx264"
 AUDIO_CODEC = "aac"
 AUDIO_BITRATE = "128k"
-VIDEO_CRF = "23"
+VIDEO_CRF = "18"
 
 
 def _ffmpeg(*args, check=True) -> subprocess.CompletedProcess:
