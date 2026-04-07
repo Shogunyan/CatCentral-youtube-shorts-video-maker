@@ -345,30 +345,44 @@ class DashboardScreen(Screen):
     def _pipeline_worker(self) -> None:
         import traceback
 
+        def _log_safe(msg):
+            try:
+                self.app.call_from_thread(self._log, msg)
+            except Exception:
+                pass
+
         def _progress(percent, action, log_msg=""):
             try:
                 self.app.call_from_thread(self._on_progress_direct, percent, action, log_msg)
-            except Exception:
-                pass
+            except Exception as e:
+                _log_safe(f"Progress error: {e}")
 
         def _finish(success, detail=""):
             try:
                 self.app.call_from_thread(self._on_finished_direct, success, detail)
-            except Exception:
-                pass
+            except Exception as e:
+                _log_safe(f"Finish error: {e}")
+
+        _log_safe("Worker thread started...")
 
         try:
             from src.scheduler import Pipeline
+            _log_safe("Pipeline imported OK")
         except Exception as exc:
+            _log_safe(f"IMPORT FAILED: {exc}\n{traceback.format_exc()}")
             _finish(False, f"Import error: {exc}")
             return
 
         try:
+            _log_safe("Creating pipeline...")
             pipeline = Pipeline(self._cfg, reporter=_progress)
+            _log_safe("Running pipeline...")
             ok = pipeline.run()
+            _log_safe(f"Pipeline finished: success={ok}")
             _finish(ok)
         except Exception as exc:
-            _finish(False, f"{exc}\n{traceback.format_exc()}")
+            _log_safe(f"PIPELINE CRASHED: {exc}\n{traceback.format_exc()}")
+            _finish(False, f"{exc}")
 
     def _on_progress_direct(self, percent: float, action: str, log_msg: str = "") -> None:
         """Called from worker thread via call_from_thread."""
