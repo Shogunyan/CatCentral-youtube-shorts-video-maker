@@ -240,6 +240,12 @@ class DashboardScreen(Screen):
     _running: reactive[bool] = reactive(False)
     _sched_active: reactive[bool] = reactive(False)
 
+    def _is_running(self) -> bool:
+        return self.__dict__.get("_pipeline_running", False)
+
+    def _set_running(self, val: bool) -> None:
+        self.__dict__["_pipeline_running"] = val
+
     def compose(self) -> ComposeResult:
         yield Header()
         with Container(id="dash"):
@@ -297,8 +303,7 @@ class DashboardScreen(Screen):
     # ── Actions ───────────────────────────────────────────────────────────────
 
     def action_run_now(self) -> None:
-        self._log("DEBUG: R key pressed")
-        if not self._running:
+        if not self._is_running():
             self._start_pipeline()
 
     def action_toggle_schedule(self) -> None:
@@ -311,12 +316,7 @@ class DashboardScreen(Screen):
 
     @on(Button.Pressed, "#btn-run")
     def _on_run(self) -> None:
-        self._log("DEBUG: Run button clicked")
         self._start_pipeline()
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        """Fallback handler for any button press."""
-        self._log(f"DEBUG: Button pressed: {event.button.id}")
 
     @on(Button.Pressed, "#btn-sched")
     def _on_sched(self) -> None:
@@ -329,12 +329,10 @@ class DashboardScreen(Screen):
     # ── Pipeline ──────────────────────────────────────────────────────────────
 
     def _start_pipeline(self) -> None:
-        self._log(f"DEBUG: _start_pipeline called, _running={self._running}")
-        if self._running:
-            self._log("DEBUG: already running, returning")
+        if self._is_running():
             return
         try:
-            self._running = True
+            self._set_running(True)
             btn = self.query_one("#btn-run", Button)
             btn.disabled = True
             btn.label = "⏳  Running…"
@@ -346,9 +344,8 @@ class DashboardScreen(Screen):
             self._pipeline_worker()
             self._log("DEBUG: _pipeline_worker called OK")
         except Exception as e:
-            self._log(f"DEBUG: _start_pipeline CRASHED: {e}")
-            import traceback
-            self._log(traceback.format_exc())
+            self._set_running(False)
+            self._log(f"❌ Startup error: {e}")
 
     @work(thread=True)
     def _pipeline_worker(self) -> None:
@@ -393,11 +390,8 @@ class DashboardScreen(Screen):
             _log_safe(f"PIPELINE CRASHED: {exc}\n{traceback.format_exc()}")
             _finish(False, f"{exc}")
         finally:
-            # Hard guarantee: always reset _running even if _finish failed
-            try:
-                self.app.call_from_thread(setattr, self, "_running", False)
-            except Exception:
-                pass
+            # Hard guarantee: always reset even if _finish failed
+            self._set_running(False)
 
     def _on_progress_direct(self, percent: float, action: str, log_msg: str = "") -> None:
         """Called from worker thread via call_from_thread."""
@@ -408,7 +402,7 @@ class DashboardScreen(Screen):
 
     def _on_finished_direct(self, success: bool, detail: str = "") -> None:
         """Called from worker thread via call_from_thread."""
-        self._running = False
+        self._set_running(False)
         btn = self.query_one("#btn-run", Button)
         btn.disabled = False
         btn.label = "▶  Run Now"
