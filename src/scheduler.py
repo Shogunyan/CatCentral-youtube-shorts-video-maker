@@ -81,10 +81,20 @@ class Pipeline:
             self._report(2, "♻️  Clip counters reset",
                          f"♻️  {reset_count} clip(s) recycled back into the pool (>14 days old)")
 
-        # ── 1. Scrape ─────────────────────────────────────────────────────────
+        # ── 1. Pick theme + scrape matching clips ─────────────────────────────
+        self._report(3, "✏  Picking video theme…",
+                     "Choosing title and matching search terms")
+        caption = generate_caption(n)
+        title = caption["title"]
+        self._report(4, "✏  Theme picked", f"Title: {title}")
+
         self._report(5, "🔍  Scraping viral cat videos…",
-                     "Searching YouTube Shorts, TikTok, and Instagram")
-        candidates = self.scraper.get_candidates(want=n * 3)
+                     f"Searching for clips matching: {title}")
+        candidates = self.scraper.get_candidates(
+            want=n * 3,
+            yt_queries=caption.get("yt_queries"),
+            tt_hashtags=caption.get("tt_hashtags"),
+        )
         if not candidates:
             self._report(5, "❌  Scraping failed",
                          "No candidates found — check internet connection")
@@ -133,12 +143,9 @@ class Pipeline:
         clip_platforms = [m.get("platform", "unknown") for m, _ in downloaded]
         used_metas = [m for m, _ in downloaded]
 
-        # ── 3. Caption ────────────────────────────────────────────────────────
-        self._report(46, "✏  Generating caption…",
-                     "Creating YouTube title, description, and hashtags")
-        caption = generate_caption(n)
-        title = caption["title"]
-        self._report(48, "✏  Caption ready", f"Title: {title}")
+        # ── 3. Caption already generated above (before scraping) ────────────
+        self._report(46, "✏  Caption ready",
+                     f"Title: {title}")
 
         # ── 3b. TTS voiceover ─────────────────────────────────────────────────
         tts_audio = None

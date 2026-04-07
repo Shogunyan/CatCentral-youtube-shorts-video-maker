@@ -46,8 +46,18 @@ def _escape_drawtext(text: str) -> str:
     return text
 
 
-def _find_font() -> str:
+def _find_font(bubbly: bool = False) -> str:
     """Return a font path that ffmpeg can use for drawtext."""
+    if bubbly:
+        # Bubbly/fun font for title overlays
+        bubbly_candidates = [
+            str(Path(__file__).parent.parent / "assets" / "fonts" / "Fredoka.ttf"),
+            "C:/Windows/Fonts/comicbd.ttf",          # Comic Sans Bold (Windows)
+        ]
+        for p in bubbly_candidates:
+            if Path(p).exists():
+                return p
+    # Fallback to standard bold fonts
     candidates = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
@@ -62,8 +72,12 @@ def _find_font() -> str:
     return ""  # let ffmpeg use its default
 
 
-FONT = _find_font()
-_FONT_OPT = f":fontfile={FONT}" if FONT else ""
+FONT_BUBBLY = _find_font(bubbly=True)
+FONT_PLAIN = _find_font(bubbly=False)
+_FONT_BUBBLY_OPT = f":fontfile={FONT_BUBBLY}" if FONT_BUBBLY else ""
+_FONT_PLAIN_OPT = f":fontfile={FONT_PLAIN}" if FONT_PLAIN else ""
+# Default used for rank numbers / watermark (plain bold)
+_FONT_OPT = _FONT_PLAIN_OPT
 
 
 # ── Step 1: Process individual clips ─────────────────────────────────────────
@@ -81,21 +95,28 @@ def _process_clip(
     rank_text = _escape_drawtext(f"#{rank}")
     title_text = _escape_drawtext(title)
 
+    # Auto-scale title font to fit within frame (max width ~960px with padding)
+    title_fontsize = 42
+    if len(title) > 40:
+        title_fontsize = 34
+    if len(title) > 50:
+        title_fontsize = 28
+
     rank_filter = (
-        f"drawtext=text='{rank_text}'{_FONT_OPT}"
-        f":fontsize=220:fontcolor=white"
+        f"drawtext=text='{rank_text}'{_FONT_BUBBLY_OPT}"
+        f":fontsize=220:fontcolor=#FFD700"
         f":borderw=10:bordercolor=black"
         f":x=(w-tw)/2:y=(h-th)/2"
-        f":box=1:boxcolor=black@0.35:boxborderw=20"
+        f":box=1:boxcolor=black@0.4:boxborderw=25"
         f":enable='between(t,0,{RANK_SHOW_SECS})'"
     )
 
     title_filter = (
-        f"drawtext=text='{title_text}'{_FONT_OPT}"
-        f":fontsize=48:fontcolor=white"
+        f"drawtext=text='{title_text}'{_FONT_BUBBLY_OPT}"
+        f":fontsize={title_fontsize}:fontcolor=#00DDFF"
         f":borderw=4:bordercolor=black"
         f":x=(w-tw)/2:y=55"
-        f":box=1:boxcolor=black@0.5:boxborderw=14"
+        f":box=1:boxcolor=black@0.55:boxborderw=14"
     )
 
     scale_crop = (
@@ -129,30 +150,37 @@ def _process_clip(
 def _make_title_card(
     output_path: Path,
     title: str,
-    duration: int = 2,
+    n_clips: int = 5,
+    duration: float = 1.5,
     tts_audio: Path | None = None,
 ) -> Path:
     """
-    Create a black title card with the ranking title centered.
-    If `tts_audio` is provided the card length matches the TTS clip and the
-    voice plays over it — otherwise a silent card of `duration` seconds is made.
+    Create a short, punchy title card with colorful text.
+    If `tts_audio` is provided the card length matches the TTS clip.
     """
     title_text = _escape_drawtext(title)
-    subtitle_text = _escape_drawtext("Ranking 5 → 1")
+    subtitle_text = _escape_drawtext(f"Ranking {n_clips} → 1")
+
+    # Auto-scale title to fit — two lines if needed
+    title_fontsize = 58
+    if len(title) > 35:
+        title_fontsize = 48
+    if len(title) > 45:
+        title_fontsize = 40
 
     vf = (
-        f"drawtext=text='{title_text}'{_FONT_OPT}"
-        f":fontsize=72:fontcolor=white"
-        f":borderw=5:bordercolor=black"
-        f":x=(w-tw)/2:y=(h-th)/2-60,"
-        f"drawtext=text='{subtitle_text}'{_FONT_OPT}"
-        f":fontsize=46:fontcolor=yellow"
-        f":borderw=3:bordercolor=black"
-        f":x=(w-tw)/2:y=(h-th)/2+60"
+        f"drawtext=text='{title_text}'{_FONT_BUBBLY_OPT}"
+        f":fontsize={title_fontsize}:fontcolor=#00DDFF"
+        f":borderw=6:bordercolor=black"
+        f":x=(w-tw)/2:y=(h/2)-80,"
+        f"drawtext=text='{subtitle_text}'{_FONT_BUBBLY_OPT}"
+        f":fontsize=42:fontcolor=#FFD700"
+        f":borderw=4:bordercolor=black"
+        f":x=(w-tw)/2:y=(h/2)+30"
     )
 
     if tts_audio and tts_audio.exists():
-        # Card length = TTS length + small tail; audio = the TTS voice
+        # Card length = TTS length; audio = the TTS voice
         _ffmpeg(
             "-f", "lavfi",
             "-i", f"color=c=black:size={TARGET_W}x{TARGET_H}:rate={FPS}",
@@ -160,12 +188,12 @@ def _make_title_card(
             "-vf", vf,
             "-c:v", VIDEO_CODEC, "-crf", VIDEO_CRF, "-preset", "fast",
             "-c:a", AUDIO_CODEC, "-b:a", AUDIO_BITRATE, "-ar", "44100", "-ac", "2",
-            "-shortest",          # end when the TTS clip ends
+            "-shortest",
             "-movflags", "+faststart",
             str(output_path),
         )
     else:
-        # Silent title card
+        # Silent title card — short and punchy
         _ffmpeg(
             "-f", "lavfi",
             "-i", f"color=c=black:size={TARGET_W}x{TARGET_H}:rate={FPS}",
@@ -586,7 +614,7 @@ def create_ranking_video(
         _step("Creating title card…")
         title_card = tmp / "title_card.mp4"
         intro_tts = (tts_audio or {}).get("intro")
-        _make_title_card(title_card, title, duration=2, tts_audio=intro_tts)
+        _make_title_card(title_card, title, n_clips=n, duration=1.5, tts_audio=intro_tts)
 
         # ── 3. Concatenate: title card first, then rank 5→1 ──────────────────
         _step("Concatenating all clips…")

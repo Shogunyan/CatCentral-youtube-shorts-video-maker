@@ -325,21 +325,26 @@ class VideoScraper:
 
     # ── Scraping phases ───────────────────────────────────────────────────────
 
-    def _scrape_current(self) -> list[dict]:
-        """Phase 1: scrape currently trending / recently viral content."""
+    def _scrape_current(
+        self,
+        yt_queries: list[str] | None = None,
+        tt_hashtags: list[str] | None = None,
+    ) -> list[dict]:
+        """Phase 1: scrape currently trending content using theme-matched queries."""
         all_videos: list[dict] = []
 
-        yt_queries = random.sample(YOUTUBE_QUERIES, min(3, len(YOUTUBE_QUERIES)))
-        for q in yt_queries:
+        # Use theme-specific queries if provided, else fall back to generic
+        queries = yt_queries or random.sample(YOUTUBE_QUERIES, min(3, len(YOUTUBE_QUERIES)))
+        for q in queries:
             try:
                 vids = self.scrape_youtube_shorts(q, max_results=15)
-                all_videos.extend(vids[:6])
+                all_videos.extend(vids[:8])
                 logger.debug(f"[current] YouTube '{q}': {len(vids)} results")
             except Exception as e:
                 logger.warning(f"YouTube query '{q}' failed: {e}")
 
-        tt_tags = random.sample(TIKTOK_HASHTAGS, min(2, len(TIKTOK_HASHTAGS)))
-        for tag in tt_tags:
+        tags = tt_hashtags or random.sample(TIKTOK_HASHTAGS, min(2, len(TIKTOK_HASHTAGS)))
+        for tag in tags:
             try:
                 vids = self.scrape_tiktok(tag, max_results=10)
                 all_videos.extend(vids[:4])
@@ -426,15 +431,17 @@ class VideoScraper:
 
     # ── Main public API ───────────────────────────────────────────────────────
 
-    def get_candidates(self, want: int = 15) -> list[dict]:
+    def get_candidates(
+        self,
+        want: int = 15,
+        yt_queries: list[str] | None = None,
+        tt_hashtags: list[str] | None = None,
+    ) -> list[dict]:
         """
         Return a pool of candidate videos, preferring fresh content.
 
-        Phase 1 — Current viral:  fresh clips from trending searches.
-        Phase 2 — Older viral:    timeless clips with high engagement floors.
-                                  Only triggered if Phase 1 yields < want fresh clips.
-        Phase 3 — Reuse filler:   previously-used clips (up to MAX_CLIP_REUSE times).
-                                  Only fills remaining slots after Phases 1+2.
+        If yt_queries / tt_hashtags are provided (from the caption theme),
+        those are used instead of the generic search terms so clips match the title.
         """
         def _dedup(videos: list[dict]) -> list[dict]:
             seen: set[str] = set()
@@ -446,7 +453,8 @@ class VideoScraper:
             return out
 
         # ── Phase 1 ───────────────────────────────────────────────────────────
-        current = _dedup(self._scrape_current())
+        current = _dedup(self._scrape_current(
+            yt_queries=yt_queries, tt_hashtags=tt_hashtags))
         fresh = [v for v in current if self._use_count(v["id"]) == 0]
         logger.info(f"Phase 1: {len(fresh)} fresh current candidates")
 

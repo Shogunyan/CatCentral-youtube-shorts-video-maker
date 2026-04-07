@@ -338,40 +338,48 @@ class DashboardScreen(Screen):
     @work(thread=True)
     def _pipeline_worker(self) -> None:
         import traceback
+
+        def _progress(percent, action, log_msg=""):
+            try:
+                self.app.call_from_thread(self._on_progress_direct, percent, action, log_msg)
+            except Exception:
+                pass
+
+        def _finish(success, detail=""):
+            try:
+                self.app.call_from_thread(self._on_finished_direct, success, detail)
+            except Exception:
+                pass
+
         try:
             from src.scheduler import Pipeline
         except Exception as exc:
-            self.post_message(PipelineFinished(
-                success=False, detail=f"Import error: {exc}\n{traceback.format_exc()}"))
+            _finish(False, f"Import error: {exc}")
             return
 
-        def reporter(percent: float, action: str, log_msg: str = "") -> None:
-            self.post_message(PipelineProgress(percent, action, log_msg))
-
         try:
-            pipeline = Pipeline(self._cfg, reporter=reporter)
+            pipeline = Pipeline(self._cfg, reporter=_progress)
             ok = pipeline.run()
-            self.post_message(PipelineFinished(success=ok))
+            _finish(ok)
         except Exception as exc:
-            self.post_message(PipelineFinished(
-                success=False, detail=f"{exc}\n{traceback.format_exc()}"))
+            _finish(False, f"{exc}\n{traceback.format_exc()}")
 
-    @on(PipelineProgress)
-    def _on_progress(self, msg: PipelineProgress) -> None:
-        self.query_one("#pbar", ProgressBar).update(progress=msg.percent)
-        self._update_action(msg.action)
-        if msg.log_msg:
-            self._log(msg.log_msg)
+    def _on_progress_direct(self, percent: float, action: str, log_msg: str = "") -> None:
+        """Called from worker thread via call_from_thread."""
+        self.query_one("#pbar", ProgressBar).update(progress=percent)
+        self._update_action(action)
+        if log_msg:
+            self._log(log_msg)
 
-    @on(PipelineFinished)
-    def _on_finished(self, msg: PipelineFinished) -> None:
+    def _on_finished_direct(self, success: bool, detail: str = "") -> None:
+        """Called from worker thread via call_from_thread."""
         self._running = False
         btn = self.query_one("#btn-run", Button)
         btn.disabled = False
         btn.label = "▶  Run Now"
         self._refresh_sched_label()
 
-        if msg.success:
+        if success:
             self.query_one("#pbar", ProgressBar).update(progress=100)
             self._update_action("✅  Done!  Video is live on YouTube.")
             self._log("─" * 48)
@@ -379,7 +387,7 @@ class DashboardScreen(Screen):
             self._log("─" * 48)
         else:
             self._update_action("❌  Pipeline failed — see log for details")
-            self._log(f"❌  Error: {msg.detail}" if msg.detail else "❌  Pipeline failed")
+            self._log(f"❌  Error: {detail}" if detail else "❌  Pipeline failed")
 
     # ── Scheduler ─────────────────────────────────────────────────────────────
 
