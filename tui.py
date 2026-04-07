@@ -297,6 +297,7 @@ class DashboardScreen(Screen):
     # ── Actions ───────────────────────────────────────────────────────────────
 
     def action_run_now(self) -> None:
+        self._log("DEBUG: R key pressed")
         if not self._running:
             self._start_pipeline()
 
@@ -310,7 +311,12 @@ class DashboardScreen(Screen):
 
     @on(Button.Pressed, "#btn-run")
     def _on_run(self) -> None:
+        self._log("DEBUG: Run button clicked")
         self._start_pipeline()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Fallback handler for any button press."""
+        self._log(f"DEBUG: Button pressed: {event.button.id}")
 
     @on(Button.Pressed, "#btn-sched")
     def _on_sched(self) -> None:
