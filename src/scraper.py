@@ -54,51 +54,54 @@ def _parse_comment_timestamps(
 
 MAX_CLIP_REUSE = 2
 
-# Max seconds per compilation segment — must stay close to clip_duration (10s)
+# Max seconds per compilation segment — stays close to clip_duration (15s)
 # so one segment = one cat moment, not two cats crammed together.
-SEGMENT_TARGET_SECS = 11
+SEGMENT_TARGET_SECS = 16
 
 # ── Primary: individual short viral cat clips ─────────────────────────────────
-# Short individual videos (5–60s) where the WHOLE clip IS the funny moment.
-# No slicing needed. Great for iconic memes from 2017-2022.
+# Every query explicitly contains "cat" so YouTube returns cat content.
+# Target: short individual videos (5–60s) where the whole clip = the moment.
 VIRAL_CAT_QUERIES = [
-    # Classic/iconic meme-era searches
+    # YouTube Shorts cat clips (most reliable)
+    "funny cat shorts",
+    "cat being funny short",
+    "cat scared funny short",
+    "cat attack funny shorts",
+    "cat zoomies shorts",
+    "cat yelling funny shorts",
+    "kitten funny shorts",
+    "cats being weird shorts",
+    "cat reaction funny shorts",
+    "cat fails funny shorts",
+    # Classic viral cat moments
     "funny cat video 2019",
-    "funny cat video 2018",
-    "viral cat video 2017",
-    "classic funny cat meme original",
-    "iconic cat video",
-    "viral cat moment original",
-    # Specific behaviours that appear in every ranking video
-    "cat scared funny original video",
-    "cat yelling funny video",
-    "cat making weird noise funny",
-    "cat jump scare funny",
-    "cat obsessed funny video",
-    "cat zoomies crazy funny",
-    "cat knocking things off table funny",
-    "cat fights reflection mirror funny",
-    "cat attacks owner funny",
-    "cat stuck in box funny",
+    "funny cat video 2020",
+    "viral cat video original",
+    "cat makes weird noise funny",
+    "cat knocking things off table",
+    "cat vs mirror funny",
+    "cat jumps scare funny",
     "cat refuses to move funny",
     "cat falls off counter funny",
-    "cat dramatically rolls over",
-    "cat surprised reaction funny",
     "cat hissing funny",
-    "cat chirping at birds funny",
-    "cat biscuits funny",
+    "cat chirping funny",
+    "cat obsessed funny",
+    "cats going crazy funny",
+    "cat caught doing something funny",
 ]
 
-# ── Secondary: compilation extraction ────────────────────────────────────────
-# Used only if individual search doesn't find enough fresh clips.
+# ── Secondary: TikTok cat compilations on YouTube ────────────────────────────
+# Well-curated collections of TikTok cat clips; chapters give exact boundaries.
 COMPILATION_QUERIES = [
+    "funny cat tiktok compilation 2024",
     "funny cat tiktok compilation 2025",
-    "viral cat moments compilation 2024",
-    "best cat clips compilation 2024",
-    "funniest cats compilation no commentary",
-    "cats being cats tiktok compilation",
-    "cat fails funny compilation",
-    "daily dose of internet cats",
+    "best cat tiktok clips compilation",
+    "cats tiktok funny compilation",
+    "viral cat tiktok moments compilation",
+    "funniest cat tiktok videos compilation",
+    "cat tiktok compilation no commentary",
+    "daily dose of internet cat videos",
+    "cat fails tiktok compilation",
 ]
 
 
@@ -113,6 +116,25 @@ def _is_unwanted(title: str) -> bool:
         "#1 to #", "top 10", "top 5", "top 20",
     ]
     return any(kw in t for kw in BLOCK)
+
+
+# Cat-related words that must appear in a video title for it to be accepted.
+_CAT_WORDS = {
+    "cat", "cats", "kitten", "kittens", "kitty", "kitties",
+    "feline", "meow", "purring", "tabby", "calico", "nyan",
+    "tomcat", "catty", "cattos", "catto",
+}
+
+
+def _is_cat_video(title: str) -> bool:
+    """
+    Return True only if the video title clearly contains a cat-related word.
+    Uses whole-word matching to avoid false positives like 'education' or 'locate'.
+    """
+    if not title:
+        return False
+    words = set(re.findall(r"\b[a-z]+\b", title.lower()))
+    return bool(words & _CAT_WORDS)
 
 
 class VideoScraper:
@@ -280,6 +302,9 @@ class VideoScraper:
             if not vid_id:
                 continue
             title = e.get("title", "")
+            if not _is_cat_video(title):
+                logger.debug(f"Skipping non-cat compilation: {title!r}")
+                continue
             if _is_unwanted(title):
                 continue
             duration = e.get("duration") or 0
@@ -461,6 +486,10 @@ class VideoScraper:
                     if duration and duration > 60:
                         continue
                     title = e.get("title", "")
+                    # Hard reject: must be an actual cat video
+                    if not _is_cat_video(title):
+                        logger.debug(f"Rejected (not a cat): {title!r}")
+                        continue
                     if _is_unwanted(title):
                         continue
                     all_videos.append({
