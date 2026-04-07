@@ -370,9 +370,10 @@ def _add_watermark(input_path: Path, output_path: Path, watermark_text: str) -> 
     )
 
     # Like & subscribe popup badge — shows at t=3..6
+    # Use fixed pixel coords (1080×1920 frame) — drawbox doesn't support iw/ih expressions in all ffmpeg builds
+    # x=280 = (1080-520)/2, y=1710 = 1920-210
     popup_box = (
-        "drawbox"
-        ":x=(iw-520)/2:y=ih-210:w=520:h=88"
+        "drawbox=x=280:y=1710:w=520:h=88"
         ":color=#EE1111@0.88:t=fill"
         ":enable='between(t,3,6)'"
     )
@@ -380,15 +381,14 @@ def _add_watermark(input_path: Path, output_path: Path, watermark_text: str) -> 
         f"drawtext=text='LIKE \\& SUBSCRIBE'{_FONT_B}"
         ":fontsize=40:fontcolor=white"
         ":borderw=3:bordercolor=black@0.8"
-        ":x=(w-tw)/2:y=ih-192"
+        ":x=(w-tw)/2:y=1728"
         ":enable='between(t,3,6)'"
     )
-    # Small bell/notify hint below
     popup_hint = (
         f"drawtext=text='for more cat videos'{_FONT_P}"
         ":fontsize=24:fontcolor=white@0.8"
         ":borderw=2:bordercolor=black@0.6"
-        ":x=(w-tw)/2:y=ih-152"
+        ":x=(w-tw)/2:y=1768"
         ":enable='between(t,3,6)'"
     )
 
