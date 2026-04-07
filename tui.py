@@ -237,8 +237,9 @@ class DashboardScreen(Screen):
         Binding("q", "app.quit", "Quit"),
     ]
 
-    _running: reactive[bool] = reactive(False)
-    _sched_active: reactive[bool] = reactive(False)
+    # Plain instance vars — reactive was causing _running to be True on init
+    _running = False
+    _sched_active = False
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -277,6 +278,8 @@ class DashboardScreen(Screen):
 
     def on_mount(self) -> None:
         from config import Config
+        self._running = False
+        self._sched_active = False
         self._cfg = Config()
         self._refresh_sched_label()
         self._log("CatCentral ready.  Press  R  or click  Run Now  to start.")
