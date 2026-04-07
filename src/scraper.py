@@ -3,6 +3,9 @@ scraper.py — Discovers viral cat clips by extracting segments from popular
 YouTube compilation videos.
 
 Strategy:
+  Phase 0 — Viral ranking sources: find cat ranking Shorts with 500k+ views,
+             extract source clip IDs from their descriptions, and search for
+             clips matching their chapter titles. Highest-priority candidates.
   Phase 1 — Compilation extraction: find popular cat compilation videos (1–20 min),
              extract individual clip segments using chapter markers or even splits.
   Phase 2 — Individual fallback: if Phase 1 doesn't yield enough clips, search
@@ -54,9 +57,9 @@ def _parse_comment_timestamps(
 
 MAX_CLIP_REUSE = 2
 
-# Max seconds per compilation segment — stays close to clip_duration (15s)
+# Max seconds per compilation segment — stays close to clip_duration (20s)
 # so one segment = one cat moment, not two cats crammed together.
-SEGMENT_TARGET_SECS = 16
+SEGMENT_TARGET_SECS = 21
 
 # ── Primary: individual short viral cat clips ─────────────────────────────────
 # Every query explicitly contains "cat" so YouTube returns cat content.
@@ -103,6 +106,31 @@ COMPILATION_QUERIES = [
     "daily dose of internet cat videos",
     "cat fails tiktok compilation",
 ]
+
+# ── Phase 0: viral cat ranking videos as clip sources ─────────────────────────
+# Popular "Top 5 / Ranked" cat Shorts — we mine their descriptions and chapter
+# titles to find the actual source clips inside them.
+RANKING_SOURCE_QUERIES = [
+    "top 10 funniest cat moments ranked shorts",
+    "best cat videos ranked funny",
+    "cat ranking countdown funny shorts",
+    "funniest cats ranked youtube shorts",
+    "top cat moments compilation ranked",
+    "cat ranking #1 funny shorts",
+    "cats ranked worst to best funny moments",
+]
+
+# Minimum views a ranking video must have before we mine it.
+RANKING_MIN_VIEWS = 500_000
+
+# How many ranking videos to analyse per pipeline run.
+RANKING_ANALYSE_COUNT = 3
+
+# Regex: fish YouTube video IDs out of description text
+_YT_ID_RE = re.compile(
+    r'(?:youtu\.be/|youtube\.com/(?:watch\?(?:[^&"]*&)*v=|shorts/|embed/))'
+    r'([\w-]{11})'
+)
 
 
 def _is_unwanted(title: str) -> bool:
@@ -492,7 +520,7 @@ class VideoScraper:
                         continue
                     if _is_unwanted(title):
                         continue
-                    all_videos.append({
+                    clip_entry: dict = {
                         "id":         vid_id,
                         "url":        f"https://www.youtube.com/watch?v={vid_id}",
                         "title":      title,
@@ -502,10 +530,187 @@ class VideoScraper:
                         "view_count": e.get("view_count") or 0,
                         "like_count": e.get("like_count") or 0,
                         "duration":   duration,
-                    })
+                    }
+                    # For mid-length clips (20–60s), use comment timestamps to
+                    # pinpoint the peak funny moment before queueing for download.
+                    if duration and 20 <= duration <= 60:
+                        ts_list = self._get_comment_timestamps(clip_entry["url"], duration)
+                        if ts_list:
+                            best_start = ts_list[0]
+                            best_end = min(
+                                best_start + SEGMENT_TARGET_SECS,
+                                duration - 1,
+                            )
+                            if best_end > best_start + 3:
+                                clip_entry["start_time"] = best_start
+                                clip_entry["end_time"]   = best_end
+                                clip_entry["id"] = f"{vid_id}_{int(best_start)}"
+                                logger.info(
+                                    f"  Peak moment {vid_id}: "
+                                    f"{best_start:.1f}s–{best_end:.1f}s "
+                                    f"({len(ts_list)} comment votes)"
+                                )
+                    all_videos.append(clip_entry)
             except Exception as e:
                 logger.warning(f"Individual clip query failed '{q}': {e}")
         return sorted(all_videos, key=lambda x: x["view_count"], reverse=True)
+
+    # ── Phase 0: mine viral ranking videos for source clips ──────────────────
+
+    def _scrape_viral_ranking_sources(self, want: int = 20) -> list[dict]:
+        """
+        Phase 0 — High-priority candidates from popular cat ranking Shorts.
+
+        Algorithm:
+          1. Search for cat ranking videos with 500k+ views.
+          2. Analyse at least RANKING_ANALYSE_COUNT of them.
+          3. Extract source video IDs from their descriptions.
+          4. For each source video:
+             - If short (≤60s): use as an individual clip directly.
+             - If longer: extract segments via chapters / comment timestamps.
+          5. Build search queries from chapter titles and run them too.
+        """
+        phase0: list[dict] = []
+        seen_ids: set[str] = set()
+        ranking_vids: list[dict] = []
+
+        # Step 1: find popular ranking videos
+        queries = random.sample(RANKING_SOURCE_QUERIES, min(4, len(RANKING_SOURCE_QUERIES)))
+        for q in queries:
+            if len(ranking_vids) >= RANKING_ANALYSE_COUNT * 4:
+                break
+            logger.info(f"Phase 0: searching ranking sources '{q[:55]}'")
+            entries = self._ydl_extract_flat(f"ytsearch12:{q}", playlist_end=12)
+            for e in entries:
+                if not e:
+                    continue
+                vid_id = e.get("id", "")
+                if not vid_id or vid_id in seen_ids:
+                    continue
+                views = e.get("view_count") or 0
+                if views < RANKING_MIN_VIEWS:
+                    continue
+                title = e.get("title", "")
+                if not _is_cat_video(title):
+                    continue
+                seen_ids.add(vid_id)
+                ranking_vids.append({
+                    "id":         vid_id,
+                    "url":        f"https://www.youtube.com/watch?v={vid_id}",
+                    "title":      title,
+                    "view_count": views,
+                })
+
+        ranking_vids.sort(key=lambda x: x["view_count"], reverse=True)
+        to_analyse = ranking_vids[:RANKING_ANALYSE_COUNT]
+        logger.info(
+            f"Phase 0: {len(ranking_vids)} ranking videos ≥{RANKING_MIN_VIEWS:,} views; "
+            f"analysing top {len(to_analyse)}"
+        )
+
+        chapter_queries: list[str] = []
+
+        for rv in to_analyse:
+            logger.info(
+                f"  Analysing: '{rv['title'][:60]}' ({rv['view_count']:,} views)"
+            )
+            info = self._ydl_get_info(rv["url"])
+            if not info:
+                continue
+
+            # Step 3: extract source clip IDs from description
+            description = info.get("description") or ""
+            found_ids = _YT_ID_RE.findall(description)
+            logger.info(f"  {len(found_ids)} source ID(s) in description")
+            for src_id in found_ids:
+                if self._is_used(src_id) or src_id in seen_ids or src_id == rv["id"]:
+                    continue
+                seen_ids.add(src_id)
+                src_url = f"https://www.youtube.com/watch?v={src_id}"
+                src_info = self._ydl_get_info(src_url)
+                if not src_info:
+                    continue
+                duration = src_info.get("duration") or 0
+                src_title = src_info.get("title") or ""
+                if not _is_cat_video(src_title):
+                    continue
+                if duration and duration > 60:
+                    # Longer video — extract clips from it
+                    clips = self._clips_from_compilation({
+                        "id":         src_id,
+                        "url":        src_url,
+                        "title":      src_title,
+                        "duration":   duration,
+                        "view_count": src_info.get("view_count") or 0,
+                    })
+                    for c in clips:
+                        c["_phase0"] = True
+                    phase0.extend(clips)
+                    logger.info(
+                        f"  Source {src_id}: extracted {len(clips)} segments "
+                        f"from {duration:.0f}s video"
+                    )
+                else:
+                    # Short individual clip — use as-is
+                    phase0.append({
+                        "id":         src_id,
+                        "url":        src_url,
+                        "title":      src_title,
+                        "start_time": None,
+                        "end_time":   None,
+                        "platform":   "youtube",
+                        "view_count": src_info.get("view_count") or 0,
+                        "like_count": src_info.get("like_count") or 0,
+                        "duration":   duration,
+                        "_phase0":    True,
+                    })
+
+            # Step 4: collect chapter titles → search queries
+            chapters = info.get("chapters") or []
+            for ch in chapters:
+                ch_title = (ch.get("title") or "").strip()
+                # Strip ranking prefixes like "#5 —" or "5."
+                cleaned = re.sub(r'^#?\d+[\.\-:\s]+', '', ch_title).strip()
+                if len(cleaned) >= 4:
+                    chapter_queries.append(f"{cleaned} cat funny")
+
+        # Step 4 continued: search for clips matching chapter titles
+        logger.info(f"Phase 0: searching {len(chapter_queries)} chapter-title queries")
+        for cq in chapter_queries[:14]:
+            if len(phase0) >= want:
+                break
+            try:
+                entries = self._ydl_extract_flat(f"ytsearch5:{cq}", playlist_end=5)
+                for e in entries:
+                    if not e:
+                        continue
+                    vid_id = e.get("id", "")
+                    if not vid_id or vid_id in seen_ids or self._is_used(vid_id):
+                        continue
+                    duration = e.get("duration") or 0
+                    if duration and duration > 60:
+                        continue
+                    title = e.get("title", "")
+                    if not _is_cat_video(title):
+                        continue
+                    seen_ids.add(vid_id)
+                    phase0.append({
+                        "id":         vid_id,
+                        "url":        f"https://www.youtube.com/watch?v={vid_id}",
+                        "title":      title,
+                        "start_time": None,
+                        "end_time":   None,
+                        "platform":   "youtube",
+                        "view_count": e.get("view_count") or 0,
+                        "like_count": e.get("like_count") or 0,
+                        "duration":   duration,
+                        "_phase0":    True,
+                    })
+            except Exception as ex:
+                logger.debug(f"Phase 0 chapter query failed '{cq}': {ex}")
+
+        logger.info(f"Phase 0: {len(phase0)} high-priority candidates collected")
+        return phase0
 
     def _get_reusable_candidates(self) -> list[dict]:
         """Phase 3: previously-used clips that are under the reuse limit."""
@@ -550,6 +755,12 @@ class VideoScraper:
                     out.append(v)
             return out
 
+        # Phase 0: High-priority clips mined from viral ranking videos (500k+ views)
+        logger.info("Phase 0: Mining viral cat ranking videos for source clips…")
+        phase0_clips = _dedup(self._scrape_viral_ranking_sources(want=want))
+        phase0_fresh = [v for v in phase0_clips if self._use_count(v["id"]) == 0]
+        logger.info(f"Phase 0: {len(phase0_fresh)} high-priority fresh clips")
+
         # Phase 1: Individual short viral clips (primary)
         # These are complete 5–60s videos where the whole clip = the funny moment.
         # Use theme queries + the broad VIRAL_CAT_QUERIES pool.
@@ -561,9 +772,12 @@ class VideoScraper:
         fresh = [v for v in ind if self._use_count(v["id"]) == 0]
         logger.info(f"Phase 1: {len(fresh)} fresh individual clips found")
 
+        # Merge Phase 0 + Phase 1 (Phase 0 items go first — highest priority)
+        combined_p01 = _dedup(phase0_fresh + fresh)
+
         # Phase 2: Compilation extraction fallback
-        if len(fresh) < want:
-            need = want - len(fresh)
+        if len(combined_p01) < want:
+            need = want - len(combined_p01)
             logger.info(f"Phase 2: Need {need} more — extracting from compilations…")
             comp_queries = None
             if yt_queries:
@@ -571,9 +785,9 @@ class VideoScraper:
             raw = self._scrape_compilations(queries=comp_queries, want=need)
             fresh_comp = [v for v in _dedup(raw) if self._use_count(v["id"]) == 0]
             logger.info(f"Phase 2: {len(fresh_comp)} fresh compilation clips")
-            all_fresh = _dedup(fresh + fresh_comp)
+            all_fresh = _dedup(combined_p01 + fresh_comp)
         else:
-            all_fresh = fresh
+            all_fresh = combined_p01
 
         # Phase 3: Reusable clips
         if len(all_fresh) < want:
@@ -589,13 +803,16 @@ class VideoScraper:
             logger.warning("No candidates found across all phases")
             return []
 
-        # Prioritise highest-viewed source videos (more viral = better clips)
-        fresh_pool = [v for v in combined if not v.get("_reuse")]
+        # Priority order: Phase 0 (viral ranking sources) → regular fresh → reuse
+        p0_pool    = [v for v in combined if v.get("_phase0") and not v.get("_reuse")]
+        fresh_pool = [v for v in combined if not v.get("_phase0") and not v.get("_reuse")]
         reuse_pool = [v for v in combined if v.get("_reuse")]
+        p0_pool.sort(key=lambda x: x.get("view_count", 0), reverse=True)
         fresh_pool.sort(key=lambda x: x.get("view_count", 0), reverse=True)
 
         target = max(want * 3, 20)
-        pool = fresh_pool[:target] + reuse_pool[:max(0, target - len(fresh_pool))]
+        combined_ordered = p0_pool + fresh_pool
+        pool = combined_ordered[:target] + reuse_pool[:max(0, target - len(combined_ordered))]
         random.shuffle(pool)
 
         logger.info(f"Returning {len(pool)} candidates total")

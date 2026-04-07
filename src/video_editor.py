@@ -217,7 +217,6 @@ def _build_ranking_overlay(
     )
 
     # ── Left panel ────────────────────────────────────────────────────────────
-    parts.append("drawbox=x=0:y=125:w=360:h=1700:color=black@0.52:t=fill")
 
     # Item positions — spread evenly between y=155 and y=1820
     y_start  = 165
@@ -232,26 +231,26 @@ def _build_ranking_overlay(
 
         if is_current:
             num_color = "#FFD700"
-            num_size  = 84
+            num_size  = 112          # was 84
             lbl_color = "#FFFFFF"
-            lbl_size  = 40
+            lbl_size  = 56           # was 40
         elif is_past:
             num_color = "white@0.55"
-            num_size  = 54
+            num_size  = 76           # was 54
             lbl_color = "white@0.55"
-            lbl_size  = 28
+            lbl_size  = 40           # was 28
         else:
             num_color = "white@0.28"
-            num_size  = 54
+            num_size  = 76           # was 54
             lbl_color = "white@0.28"
-            lbl_size  = 28
+            lbl_size  = 40           # was 28
 
         # Rank number
         num_str = _escape_drawtext(f"{rank}.")
         parts.append(
             f"drawtext=text='{num_str}'{_FONT_B}"
             f":fontsize={num_size}:fontcolor={num_color}"
-            f":borderw=3:bordercolor=black@0.9"
+            f":borderw=5:bordercolor=black@0.95"   # was borderw=3
             f":x=16:y={y}"
         )
 
@@ -266,7 +265,7 @@ def _build_ranking_overlay(
         parts.append(
             f"drawtext=text='{lbl_str}'{_FONT_B}"
             f":fontsize={lbl_size}:fontcolor={lbl_color}"
-            f":borderw=2:bordercolor=black@0.85"
+            f":borderw=4:bordercolor=black@0.9"    # was borderw=2
             f":x=108:y={lbl_y}"
         )
 

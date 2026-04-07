@@ -27,7 +27,7 @@ class Config:
 
     # ── Video ──────────────────────────────────────────────────
     clips_per_video: int = int(os.getenv("CLIPS_PER_VIDEO", "5"))
-    clip_duration: int = int(os.getenv("CLIP_DURATION", "15"))
+    clip_duration: int = int(os.getenv("CLIP_DURATION", "20"))
     watermark_text: str = os.getenv("WATERMARK_TEXT", "@CatCentral")
 
     # ── TTS voiceover ──────────────────────────────────────────────────────────
