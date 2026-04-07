@@ -34,7 +34,9 @@ def _is_wsl() -> bool:
 
 
 def _open_browser(url: str) -> None:
-    """Open a URL — tries several methods for WSL, falls back to printing the URL."""
+    """Open a URL — WSL, Mac, Linux, with URL fallback print."""
+    import platform
+
     # Always save the URL to a file so it can be retrieved if the browser doesn't open
     try:
         with open("/tmp/catcentral_auth_url.txt", "w") as f:
@@ -55,11 +57,28 @@ def _open_browser(url: str) -> None:
                 continue
             except Exception:
                 continue
-    # Non-WSL or all WSL methods failed — try standard webbrowser
-    try:
-        webbrowser.open(url)
-    except Exception:
-        pass
+    elif platform.system() == "Darwin":
+        # macOS — use the `open` command directly (avoids monkey-patched webbrowser.open)
+        try:
+            subprocess.Popen(["open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        except Exception:
+            pass
+    else:
+        # Native Linux — xdg-open, then webbrowser controller (not the patched module fn)
+        try:
+            subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        except FileNotFoundError:
+            pass
+        try:
+            webbrowser.get().open(url)
+            return
+        except Exception:
+            pass
+
+    # Last resort — print the URL so the user can open it manually
+    print(f"\n  Please open this URL in your browser to authenticate:\n  {url}\n")
 
 SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
