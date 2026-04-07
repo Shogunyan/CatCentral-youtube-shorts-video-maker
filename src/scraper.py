@@ -3,14 +3,16 @@ scraper.py — Discovers viral cat clips by extracting segments from popular
 YouTube compilation videos.
 
 Strategy:
-  Phase 0 — Viral ranking sources: find cat ranking Shorts with 500k+ views,
-             extract source clip IDs from their descriptions, and search for
-             clips matching their chapter titles. Highest-priority candidates.
-  Phase 1 — Compilation extraction: find popular cat compilation videos (1–20 min),
-             extract individual clip segments using chapter markers or even splits.
-  Phase 2 — Individual fallback: if Phase 1 doesn't yield enough clips, search
-             for short individual cat clips directly.
-  Phase 3 — Reuse: allow previously-used clips (up to MAX_CLIP_REUSE times).
+  Phase 0a — Dedicated Shorts scraper: aggressively searches for funny cat clips
+              ≤20 seconds using 30+ targeted queries. These are the ideal inputs —
+              the whole video is the funny moment, no slicing required.
+  Phase 0b — Viral ranking sources: find cat ranking Shorts with 500k+ views,
+              extract source clip IDs from descriptions and chapter titles.
+  Phase 1  — Individual viral clips: 5–60s videos, with comment-timestamp peak
+              detection for 20–60s clips to find the funniest window.
+  Phase 2  — Compilation extraction: 1–20 min compilations sliced by chapters or
+              comment timestamps.
+  Phase 3  — Reuse: allow previously-used clips (up to MAX_CLIP_REUSE times).
 """
 import json
 import logging
@@ -60,6 +62,49 @@ MAX_CLIP_REUSE = 2
 # Max seconds per compilation segment — stays close to clip_duration (20s)
 # so one segment = one cat moment, not two cats crammed together.
 SEGMENT_TARGET_SECS = 21
+
+# ── Dedicated Shorts queries: targets ≤20s funny cat clips ───────────────────
+# These are highly specific searches that reliably surface proper short-form
+# cat clips where the whole video IS the funny moment.
+SHORT_CAT_QUERIES = [
+    # Reaction / surprise moments
+    "cat jumpscare reaction original shorts",
+    "cat scared suddenly funny shorts",
+    "cat surprised face shorts",
+    "cat shocked by owner shorts",
+    "cat attacks feet funny shorts",
+    "cat slaps dog funny shorts",
+    "cat hissing at mirror shorts",
+    "cat bites owner funny shorts",
+    # Behaviour / physics moments
+    "cat zoomies 3am shorts",
+    "cat falls off shelf funny",
+    "cat fails jump funny shorts",
+    "cat knocks glass off table shorts",
+    "cat derp face funny shorts",
+    "kitten discovers stairs shorts",
+    "cat loaf falls over shorts",
+    "cat refuses to move funny",
+    "cat sploots funny shorts",
+    # Sound moments
+    "cat yowling loudly funny short",
+    "cat makes weird noise short clip",
+    "cat chatters at window short",
+    "cat chirps at bird short clip",
+    "cat screams funny short",
+    # Expression / stare moments
+    "cat staring into void shorts",
+    "cat judges owner shorts funny",
+    "cat slow blink funny shorts",
+    "cat unimpressed face shorts",
+    "cat caught red handed funny short",
+    # Classic viral cat shorts
+    "viral cat moment 2024 shorts",
+    "viral cat moment 2025 shorts",
+    "funny cat shorts 2024",
+    "funny cat shorts 2025",
+    "cats being weird shorts compilation",
+]
 
 # ── Primary: individual short viral cat clips ─────────────────────────────────
 # Every query explicitly contains "cat" so YouTube returns cat content.
@@ -555,6 +600,75 @@ class VideoScraper:
                 logger.warning(f"Individual clip query failed '{q}': {e}")
         return sorted(all_videos, key=lambda x: x["view_count"], reverse=True)
 
+    # ── Dedicated Shorts scraper (≤20s clips) ────────────────────────────────
+
+    def _scrape_cat_shorts(self, want: int = 25) -> list[dict]:
+        """
+        Find proper short-form funny cat clips — ideally ≤20 seconds.
+
+        These are the gold-standard inputs: the entire video is the funny
+        moment, no slicing needed.  YouTube Shorts sometimes report duration=0
+        in flat-extract, so we verify ambiguous entries with a full info fetch.
+        """
+        found: list[dict] = []
+        seen: set[str] = set()
+
+        queries = random.sample(SHORT_CAT_QUERIES, min(14, len(SHORT_CAT_QUERIES)))
+
+        for q in queries:
+            if len(found) >= want:
+                break
+            try:
+                entries = self._ydl_extract_flat(f"ytsearch25:{q}", playlist_end=25)
+                for e in entries:
+                    if not e:
+                        continue
+                    vid_id = e.get("id", "")
+                    if not vid_id or vid_id in seen or self._is_used(vid_id):
+                        continue
+                    title = e.get("title", "")
+                    if not _is_cat_video(title):
+                        continue
+                    if _is_unwanted(title):
+                        continue
+                    duration = e.get("duration") or 0
+                    # Hard reject anything confirmed longer than 20s
+                    if duration and duration > 20:
+                        continue
+                    seen.add(vid_id)
+                    # Unknown duration (many Shorts report 0) — verify with full fetch
+                    if not duration:
+                        info = self._ydl_get_info(
+                            f"https://www.youtube.com/watch?v={vid_id}"
+                        )
+                        if not info:
+                            continue
+                        duration = info.get("duration") or 0
+                        if duration > 20:
+                            continue
+                        title = info.get("title") or title
+                        if not _is_cat_video(title):
+                            continue
+
+                    found.append({
+                        "id":         vid_id,
+                        "url":        f"https://www.youtube.com/watch?v={vid_id}",
+                        "title":      title,
+                        "start_time": None,
+                        "end_time":   None,
+                        "platform":   "youtube",
+                        "view_count": e.get("view_count") or 0,
+                        "like_count": e.get("like_count") or 0,
+                        "duration":   duration,
+                        "_shorts":    True,
+                    })
+            except Exception as ex:
+                logger.warning(f"Cat Shorts query failed '{q}': {ex}")
+
+        found.sort(key=lambda x: x.get("view_count", 0), reverse=True)
+        logger.info(f"Cat Shorts scraper: {len(found)} clips ≤20s found")
+        return found
+
     # ── Phase 0: mine viral ranking videos for source clips ──────────────────
 
     def _scrape_viral_ranking_sources(self, want: int = 20) -> list[dict]:
@@ -675,12 +789,13 @@ class VideoScraper:
                     chapter_queries.append(f"{cleaned} cat funny")
 
         # Step 4 continued: search for clips matching chapter titles
+        # Prefer ≤20s Shorts; fall back to accepting up to 60s with peak detection.
         logger.info(f"Phase 0: searching {len(chapter_queries)} chapter-title queries")
         for cq in chapter_queries[:14]:
             if len(phase0) >= want:
                 break
             try:
-                entries = self._ydl_extract_flat(f"ytsearch5:{cq}", playlist_end=5)
+                entries = self._ydl_extract_flat(f"ytsearch8:{cq}", playlist_end=8)
                 for e in entries:
                     if not e:
                         continue
@@ -688,13 +803,15 @@ class VideoScraper:
                     if not vid_id or vid_id in seen_ids or self._is_used(vid_id):
                         continue
                     duration = e.get("duration") or 0
+                    # Skip anything confirmed longer than 60s
                     if duration and duration > 60:
                         continue
                     title = e.get("title", "")
                     if not _is_cat_video(title):
                         continue
                     seen_ids.add(vid_id)
-                    phase0.append({
+                    is_short = not duration or duration <= 20
+                    clip: dict = {
                         "id":         vid_id,
                         "url":        f"https://www.youtube.com/watch?v={vid_id}",
                         "title":      title,
@@ -705,7 +822,19 @@ class VideoScraper:
                         "like_count": e.get("like_count") or 0,
                         "duration":   duration,
                         "_phase0":    True,
-                    })
+                        "_shorts":    is_short,
+                    }
+                    # For 20–60s clips, pin the peak funny moment via comments
+                    if duration and 20 < duration <= 60:
+                        ts_list = self._get_comment_timestamps(clip["url"], duration)
+                        if ts_list:
+                            bs = ts_list[0]
+                            be = min(bs + SEGMENT_TARGET_SECS, duration - 1)
+                            if be > bs + 3:
+                                clip["start_time"] = bs
+                                clip["end_time"]   = be
+                                clip["id"] = f"{vid_id}_{int(bs)}"
+                    phase0.append(clip)
             except Exception as ex:
                 logger.debug(f"Phase 0 chapter query failed '{cq}': {ex}")
 
@@ -755,14 +884,20 @@ class VideoScraper:
                     out.append(v)
             return out
 
-        # Phase 0: High-priority clips mined from viral ranking videos (500k+ views)
-        logger.info("Phase 0: Mining viral cat ranking videos for source clips…")
+        # Phase 0a: dedicated Shorts scraper (≤20s) — highest priority
+        # These are the best possible inputs: entire clip IS the funny moment.
+        logger.info("Phase 0a: Scraping dedicated funny cat Shorts (≤20s)…")
+        shorts_clips = _dedup(self._scrape_cat_shorts(want=want))
+        shorts_fresh = [v for v in shorts_clips if self._use_count(v["id"]) == 0]
+        logger.info(f"Phase 0a: {len(shorts_fresh)} fresh cat Shorts found")
+
+        # Phase 0b: mine viral ranking videos (500k+ views) for source clips
+        logger.info("Phase 0b: Mining viral cat ranking videos for source clips…")
         phase0_clips = _dedup(self._scrape_viral_ranking_sources(want=want))
         phase0_fresh = [v for v in phase0_clips if self._use_count(v["id"]) == 0]
-        logger.info(f"Phase 0: {len(phase0_fresh)} high-priority fresh clips")
+        logger.info(f"Phase 0b: {len(phase0_fresh)} high-priority fresh clips")
 
-        # Phase 1: Individual short viral clips (primary)
-        # These are complete 5–60s videos where the whole clip = the funny moment.
+        # Phase 1: Individual short viral clips (up to 60s with peak detection)
         # Use theme queries + the broad VIRAL_CAT_QUERIES pool.
         ind_queries = list(yt_queries or []) + random.sample(
             VIRAL_CAT_QUERIES, min(8, len(VIRAL_CAT_QUERIES))
@@ -772,8 +907,8 @@ class VideoScraper:
         fresh = [v for v in ind if self._use_count(v["id"]) == 0]
         logger.info(f"Phase 1: {len(fresh)} fresh individual clips found")
 
-        # Merge Phase 0 + Phase 1 (Phase 0 items go first — highest priority)
-        combined_p01 = _dedup(phase0_fresh + fresh)
+        # Merge: Shorts first, then Phase 0b, then Phase 1
+        combined_p01 = _dedup(shorts_fresh + phase0_fresh + fresh)
 
         # Phase 2: Compilation extraction fallback
         if len(combined_p01) < want:
@@ -803,16 +938,22 @@ class VideoScraper:
             logger.warning("No candidates found across all phases")
             return []
 
-        # Priority order: Phase 0 (viral ranking sources) → regular fresh → reuse
-        p0_pool    = [v for v in combined if v.get("_phase0") and not v.get("_reuse")]
-        fresh_pool = [v for v in combined if not v.get("_phase0") and not v.get("_reuse")]
-        reuse_pool = [v for v in combined if v.get("_reuse")]
-        p0_pool.sort(key=lambda x: x.get("view_count", 0), reverse=True)
-        fresh_pool.sort(key=lambda x: x.get("view_count", 0), reverse=True)
+        # Priority: ≤20s Shorts → Phase 0b ranking sources → regular fresh → reuse
+        # Within each tier, sort by view count descending.
+        def _tier(v: dict) -> int:
+            if v.get("_reuse"):
+                return 3
+            dur = v.get("duration") or 0
+            if v.get("_shorts") or (dur and dur <= 20):
+                return 0   # true Shorts — highest priority
+            if v.get("_phase0"):
+                return 1   # ranking-sourced clips
+            return 2       # general individual / compilation clips
+
+        combined.sort(key=lambda v: (_tier(v), -v.get("view_count", 0)))
 
         target = max(want * 3, 20)
-        combined_ordered = p0_pool + fresh_pool
-        pool = combined_ordered[:target] + reuse_pool[:max(0, target - len(combined_ordered))]
+        pool = combined[:target]
         random.shuffle(pool)
 
         logger.info(f"Returning {len(pool)} candidates total")
