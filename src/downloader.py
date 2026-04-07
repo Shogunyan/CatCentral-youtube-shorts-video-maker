@@ -161,6 +161,10 @@ class Downloader:
             "ignoreerrors": False,
             "nocheckcertificate": True,
             "merge_output_format": "mp4",
+            # Hard timeout: abort if a single fragment stalls for >30s
+            "socket_timeout": 30,
+            "retries": 2,
+            "fragment_retries": 2,
             "postprocessors": [
                 {
                     "key": "FFmpegVideoConvertor",
