@@ -12,78 +12,68 @@ import random
 
 THEMES = [
     {
-        "title": "Top {n} Funniest Cat Memes",
-        "yt_queries": ["funny cat meme shorts", "cat meme compilation shorts", "funniest cat memes shorts"],
-        "tt_hashtags": ["funnycat", "catmemes", "funnycatmemes"],
+        "title": "Funniest Cats",
+        "yt_queries": ["funny cat video", "hilarious cat moment", "funny cat caught on camera"],
+        "tt_hashtags": ["funnycat", "funnycats", "funnyanimals"],
     },
     {
-        "title": "Top {n} Cats Being ABSOLUTE Goofballs",
-        "yt_queries": ["cats being goofy shorts", "goofy cats funny shorts", "silly cats shorts"],
+        "title": "Silliest Cats Ever",
+        "yt_queries": ["silly cat video", "goofy cat moment", "cats being silly"],
         "tt_hashtags": ["sillycat", "goofycat", "catsbeingcats"],
     },
     {
-        "title": "{n} Cat Fails That Had Me DYING",
-        "yt_queries": ["cat fail funny shorts", "hilarious cat fails shorts", "cats failing compilation shorts"],
-        "tt_hashtags": ["catfail", "catfails", "funnycatfails"],
+        "title": "Hilarious Cat Moments",
+        "yt_queries": ["hilarious cat moment", "funny cat clip", "cat being hilarious"],
+        "tt_hashtags": ["funnycat", "catmoment", "hilariouscat"],
     },
     {
-        "title": "Top {n} Cats vs Cucumbers",
-        "yt_queries": ["cats vs cucumbers shorts", "cat scared of cucumber shorts", "cat cucumber reaction shorts"],
-        "tt_hashtags": ["catvscucumber", "catcucumber", "catscared"],
+        "title": "Cats Being Cats",
+        "yt_queries": ["cats being cats funny", "cat doing cat things", "cats being weird funny"],
+        "tt_hashtags": ["catsbeingcats", "catlife", "funnycats"],
     },
     {
-        "title": "{n} Cats That Chose VIOLENCE",
-        "yt_queries": ["angry cat funny shorts", "cat attack funny shorts", "cats choosing violence shorts"],
-        "tt_hashtags": ["angrycat", "catattack", "meancat"],
-    },
-    {
-        "title": "Ranking {n} CHAOTIC Cat Moments",
-        "yt_queries": ["chaotic cat moments shorts", "crazy cat moments shorts", "cats being chaotic shorts"],
-        "tt_hashtags": ["crazycats", "chaoticcat", "catmoment"],
-    },
-    {
-        "title": "Top {n} Cat Jumps Gone WRONG",
-        "yt_queries": ["cat jump fail shorts", "cat jumping fails shorts", "cats jumping funny shorts"],
-        "tt_hashtags": ["catjump", "catjumpfail", "funnycats"],
-    },
-    {
-        "title": "{n} Cats With ZERO Brain Cells",
-        "yt_queries": ["dumb cat funny shorts", "stupid cats funny shorts", "cats being dumb shorts"],
-        "tt_hashtags": ["dumbcat", "stupidcat", "catsbraincell"],
-    },
-    {
-        "title": "Top {n} Cat vs Dog Moments",
-        "yt_queries": ["cat vs dog funny shorts", "cats fighting dogs shorts", "cat and dog funny shorts"],
-        "tt_hashtags": ["catvsdog", "catanddog", "funnyanimals"],
-    },
-    {
-        "title": "Top {n} Startled Cat Reactions",
-        "yt_queries": ["cat startled funny shorts", "cats getting scared shorts", "cat surprised reaction shorts"],
-        "tt_hashtags": ["startledcat", "scaredcat", "catreaction"],
-    },
-    {
-        "title": "{n} Cats Knocking Things Off Tables",
-        "yt_queries": ["cat knocking things off table shorts", "cats pushing things off shorts", "cat table fail shorts"],
-        "tt_hashtags": ["catknockingthingsoff", "catsbeingjerks", "catpush"],
-    },
-    {
-        "title": "Top {n} Viral Cat Clips of {period}",
-        "yt_queries": ["viral cat videos shorts", "most viral cat clips shorts", "trending cat videos shorts"],
+        "title": "Viral Cat Videos",
+        "yt_queries": ["viral cat video", "most viral cat moment", "cat video gone viral"],
         "tt_hashtags": ["viralcat", "catsoftiktok", "catvideos"],
     },
     {
-        "title": "Top {n} Cats Living Their Best Life",
-        "yt_queries": ["cats living best life shorts", "spoiled cat funny shorts", "happy cat moments shorts"],
-        "tt_hashtags": ["catlife", "happycat", "catlover"],
+        "title": "Wild Cat Moments",
+        "yt_queries": ["wild cat moment funny", "crazy cat video", "cats going crazy"],
+        "tt_hashtags": ["crazycats", "wildcat", "catmoment"],
     },
     {
-        "title": "{n} Cats That Had NO Idea What Was Coming",
-        "yt_queries": ["cat surprised shorts", "unexpected cat moments shorts", "cat plot twist shorts"],
-        "tt_hashtags": ["catsurprise", "catmoment", "funnycatvideo"],
+        "title": "Unhinged Cats",
+        "yt_queries": ["unhinged cat video", "cats being unhinged", "cat losing it funny"],
+        "tt_hashtags": ["unhingedcat", "chaoticcat", "crazycats"],
+    },
+    {
+        "title": "Cats Caught Being Chaotic",
+        "yt_queries": ["chaotic cat video", "cat causing chaos funny", "cats destroying things"],
+        "tt_hashtags": ["chaoticcat", "catchaos", "funnycats"],
+    },
+    {
+        "title": "Weirdest Cat Clips",
+        "yt_queries": ["weird cat video funny", "strange cat behavior funny", "cats being weird"],
+        "tt_hashtags": ["weirdcat", "catsbeingweird", "funnycats"],
+    },
+    {
+        "title": "Cats Gone Crazy",
+        "yt_queries": ["cat going crazy funny", "cat zoomies funny", "cats running wild"],
+        "tt_hashtags": ["catzoomies", "crazycat", "funnycats"],
+    },
+    {
+        "title": "Funniest Cat Reactions",
+        "yt_queries": ["funny cat reaction video", "cat reacting funny", "cat surprised reaction"],
+        "tt_hashtags": ["catreaction", "funnycat", "catsoftiktok"],
+    },
+    {
+        "title": "Cats Doing the Most",
+        "yt_queries": ["cat doing the most funny", "extra cat funny", "dramatic cat video"],
+        "tt_hashtags": ["dramaticcat", "funnycat", "catdrama"],
     },
 ]
 
-PERIOD_OPTIONS = ["This Week", "This Month", "All Time", "Right Now", "2025"]
+PERIOD_OPTIONS = ["This Week", "This Month", "All Time", "Right Now", "2025"]  # kept for future use
 
 # ── Description templates ─────────────────────────────────────────────────────
 
@@ -119,13 +109,12 @@ BASE_TAGS = [
 def pick_theme(n: int = 5) -> dict:
     """Pick a random theme and return it with the formatted title."""
     theme = random.choice(THEMES)
-    period = random.choice(PERIOD_OPTIONS)
-    title = theme["title"].format(n=n, period=period)
-    # Strip emoji from title if it's too long
+    # title is the clean display/YouTube title — no #shorts suffix (added in description/tags)
+    title = theme["title"].format(n=n)
     if len(title) > 85:
         title = title[:82] + "..."
     return {
-        "title": title + " #shorts",
+        "title": title,
         "yt_queries": theme["yt_queries"],
         "tt_hashtags": theme["tt_hashtags"],
     }

@@ -24,6 +24,26 @@ logger = logging.getLogger(__name__)
 # A clip may appear in up to this many ranking videos before being retired.
 MAX_CLIP_REUSE = 2
 
+# ── Compilation filter ────────────────────────────────────────────────────────
+# Keywords that strongly suggest a video is itself a pre-made compilation.
+# These are filtered OUT so we only pull individual viral clips.
+_COMPILATION_KEYWORDS = [
+    "compilation", "compil", "best of", "try not to laugh",
+    "top 10", "top 5", "top 20", "top 15", "top 25", "top 50",
+    "funny cats 2024", "funny cats 2025", "funny cat videos 2",
+    "funniest cats ever", "#1 to #", "ranked from",
+    "part 1", "part 2", "part 3", "ep.", "episode",
+    "1 hour", "30 minutes", "minutes of",
+]
+
+
+def _is_compilation(title: str) -> bool:
+    """Return True if the video title suggests it's a pre-made compilation."""
+    if not title:
+        return False
+    t = title.lower()
+    return any(kw in t for kw in _COMPILATION_KEYWORDS)
+
 # ── Minimum engagement for "older viral" tier ─────────────────────────────────
 # YouTube / Instagram: view_count.  TikTok: like_count (falls back to view_count).
 OLDER_VIRAL_MIN = {
@@ -38,18 +58,20 @@ TIKTOK_OLDER_VIEW_PROXY = 1_000_000
 # ── Current viral search targets ──────────────────────────────────────────────
 
 YOUTUBE_QUERIES = [
-    "funny cat videos shorts",
-    "viral cat moments #shorts",
-    "cats being cats funny shorts",
-    "hilarious cat fails shorts",
-    "cats being goofy shorts",
-    "funny cat compilation shorts",
-    "cute cat moments viral shorts",
-    "cat surprises owner shorts",
-    "cat attack funny shorts",
-    "cats vs cucumbers shorts",
-    "cats knocking things off shorts",
-    "cats startled funny shorts",
+    "funny cat video",
+    "hilarious cat moment",
+    "cat caught on camera funny",
+    "my cat did something hilarious",
+    "cats being crazy funny",
+    "funny cat reaction",
+    "cat jump fail",
+    "cat zoomies funny",
+    "cat scared funny",
+    "cats knocking things off",
+    "cat attack owner funny",
+    "cat playing funny",
+    "kitten being adorable funny",
+    "cat yelling funny",
 ]
 
 TIKTOK_HASHTAGS = [
@@ -72,13 +94,13 @@ INSTAGRAM_HASHTAGS = [
 # Queries / hashtags that naturally surface timeless popular content.
 
 YOUTUBE_OLDER_QUERIES = [
-    "funniest cat videos of all time",
-    "best cat moments ever shorts",
-    "classic cat fails shorts",
-    "most popular cat videos shorts",
-    "viral cats best compilation shorts",
-    "top cat videos all time shorts",
-    "legendary cat moments shorts",
+    "funniest cat video ever",
+    "most viral cat moment",
+    "classic funny cat clip",
+    "cat video that went viral",
+    "the most hilarious cat",
+    "cat fails funny",
+    "legendary cat moment",
 ]
 
 TIKTOK_OLDER_HASHTAGS = [
@@ -212,7 +234,12 @@ class VideoScraper:
     def scrape_youtube_shorts(
         self, query: str, max_results: int = 20, min_views: int = 0
     ) -> list[dict]:
-        """Search YouTube and return metadata for cat-relevant short clips."""
+        """Search YouTube and return metadata for individual viral cat clips.
+
+        Accepts both Shorts (≤60s) and regular short clips (≤120s) so we
+        capture viral individual cat videos that aren't posted as Shorts.
+        Filters out pre-made compilations by title keyword.
+        """
         search_url = f"ytsearch{max_results}:{query}"
         entries = self._ydl_extract_flat(search_url, playlist_end=max_results)
 
@@ -224,15 +251,23 @@ class VideoScraper:
             if not vid_id or self._is_used(vid_id):
                 continue
             duration = e.get("duration") or 0
-            if duration and duration > 60:
-                continue  # skip non-Shorts
+            # Allow individual clips up to 2 minutes; longer = probably a compilation
+            if duration and duration > 120:
+                continue
+            title = e.get("title", "")
+            # Skip pre-made compilations
+            if _is_compilation(title):
+                logger.debug(f"Skipping compilation: {title!r}")
+                continue
             view_count = e.get("view_count") or 0
             if view_count < min_views:
                 continue
+            # Prefer YouTube Shorts URL for vertical content
+            url = f"https://www.youtube.com/watch?v={vid_id}"
             videos.append({
                 "id":         vid_id,
-                "url":        f"https://www.youtube.com/shorts/{vid_id}",
-                "title":      e.get("title", ""),
+                "url":        url,
+                "title":      title,
                 "view_count": view_count,
                 "like_count": e.get("like_count") or 0,
                 "platform":   "youtube",
@@ -243,9 +278,21 @@ class VideoScraper:
     def scrape_tiktok(
         self, hashtag: str, max_results: int = 20, min_likes: int = 0
     ) -> list[dict]:
-        """Scrape a TikTok hashtag feed."""
+        """Scrape a TikTok hashtag feed.
+
+        TikTok frequently blocks scrapers — if it does, we return an empty list
+        gracefully so the pipeline falls back to YouTube without crashing.
+        """
         url = f"https://www.tiktok.com/tag/{hashtag}"
-        entries = self._ydl_extract_flat(url, playlist_end=max_results)
+        try:
+            entries = self._ydl_extract_flat(url, playlist_end=max_results)
+        except Exception as e:
+            logger.warning(f"TikTok #{hashtag} blocked or unavailable: {e}")
+            return []
+
+        if not entries:
+            logger.debug(f"TikTok #{hashtag}: no entries returned (likely blocked)")
+            return []
 
         videos = []
         for e in entries:
@@ -259,6 +306,10 @@ class VideoScraper:
                 continue
             page_url = e.get("url") or e.get("webpage_url") or ""
             if not page_url:
+                continue
+            title = e.get("title", "")
+            if _is_compilation(title):
+                logger.debug(f"Skipping TikTok compilation: {title!r}")
                 continue
 
             view_count = e.get("view_count") or 0
@@ -274,7 +325,7 @@ class VideoScraper:
             videos.append({
                 "id":         vid_id,
                 "url":        page_url,
-                "title":      e.get("title", ""),
+                "title":      title,
                 "view_count": view_count,
                 "like_count": like_count,
                 "platform":   "tiktok",

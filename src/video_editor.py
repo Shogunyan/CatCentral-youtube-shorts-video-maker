@@ -46,6 +46,16 @@ def _escape_drawtext(text: str) -> str:
     return text
 
 
+def _clean_title_for_display(title: str) -> str:
+    """Strip hashtags and trim title for clean on-screen display."""
+    import re
+    # Remove hashtags like #shorts #cats etc.
+    title = re.sub(r"\s*#\w+", "", title).strip()
+    # Collapse multiple spaces
+    title = re.sub(r"\s{2,}", " ", title)
+    return title
+
+
 def _find_font(bubbly: bool = False) -> str:
     """Return a font path that ffmpeg can use for drawtext."""
     if bubbly:
@@ -93,30 +103,32 @@ def _process_clip(
     Resize/crop clip to 1080×1920, trim to clip_duration, add rank overlay.
     """
     rank_text = _escape_drawtext(f"#{rank}")
-    title_text = _escape_drawtext(title)
+    title_text = _escape_drawtext(_clean_title_for_display(title))
 
-    # Auto-scale title font to fit within frame (max width ~960px with padding)
-    title_fontsize = 42
-    if len(title) > 40:
-        title_fontsize = 34
-    if len(title) > 50:
-        title_fontsize = 28
+    # Auto-scale title font — shown at bottom of frame
+    clean_t = _clean_title_for_display(title)
+    title_fontsize = 36
+    if len(clean_t) > 25:
+        title_fontsize = 30
+    if len(clean_t) > 35:
+        title_fontsize = 26
 
     rank_filter = (
         f"drawtext=text='{rank_text}'{_FONT_BUBBLY_OPT}"
-        f":fontsize=220:fontcolor=#FFD700"
-        f":borderw=10:bordercolor=black"
+        f":fontsize=240:fontcolor=#FFD700"
+        f":borderw=12:bordercolor=black"
         f":x=(w-tw)/2:y=(h-th)/2"
-        f":box=1:boxcolor=black@0.4:boxborderw=25"
+        f":box=1:boxcolor=black@0.35:boxborderw=30"
         f":enable='between(t,0,{RANK_SHOW_SECS})'"
     )
 
+    # Title shown as a small banner at the bottom (always visible)
     title_filter = (
+        f"drawbox=x=0:y=h-80:w=iw:h=80:color=black@0.65:t=fill,"
         f"drawtext=text='{title_text}'{_FONT_BUBBLY_OPT}"
-        f":fontsize={title_fontsize}:fontcolor=#00DDFF"
-        f":borderw=4:bordercolor=black"
-        f":x=(w-tw)/2:y=55"
-        f":box=1:boxcolor=black@0.55:boxborderw=14"
+        f":fontsize={title_fontsize}:fontcolor=#FFFFFF"
+        f":borderw=2:bordercolor=black"
+        f":x=(w-tw)/2:y=h-60"
     )
 
     scale_crop = (
@@ -158,25 +170,28 @@ def _make_title_card(
     Create a short, punchy title card with colorful text.
     If `tts_audio` is provided the card length matches the TTS clip.
     """
-    title_text = _escape_drawtext(title)
-    subtitle_text = _escape_drawtext(f"Ranking {n_clips} → 1")
+    title_text = _escape_drawtext(_clean_title_for_display(title))
+    subtitle_text = _escape_drawtext(f"Top {n_clips} Ranked")
 
-    # Auto-scale title to fit — two lines if needed
-    title_fontsize = 58
-    if len(title) > 35:
-        title_fontsize = 48
-    if len(title) > 45:
-        title_fontsize = 40
+    # Auto-scale title to fit
+    clean_title = _clean_title_for_display(title)
+    title_fontsize = 72
+    if len(clean_title) > 20:
+        title_fontsize = 60
+    if len(clean_title) > 30:
+        title_fontsize = 50
 
     vf = (
+        # Dark semi-transparent banner behind the text
+        f"drawbox=x=0:y=(h/2)-140:w=iw:h=220:color=black@0.6:t=fill,"
         f"drawtext=text='{title_text}'{_FONT_BUBBLY_OPT}"
-        f":fontsize={title_fontsize}:fontcolor=#00DDFF"
-        f":borderw=6:bordercolor=black"
-        f":x=(w-tw)/2:y=(h/2)-80,"
+        f":fontsize={title_fontsize}:fontcolor=#FFFFFF"
+        f":borderw=5:bordercolor=black"
+        f":x=(w-tw)/2:y=(h/2)-100,"
         f"drawtext=text='{subtitle_text}'{_FONT_BUBBLY_OPT}"
-        f":fontsize=42:fontcolor=#FFD700"
-        f":borderw=4:bordercolor=black"
-        f":x=(w-tw)/2:y=(h/2)+30"
+        f":fontsize=38:fontcolor=#FFD700"
+        f":borderw=3:bordercolor=black"
+        f":x=(w-tw)/2:y=(h/2)+60"
     )
 
     if tts_audio and tts_audio.exists():

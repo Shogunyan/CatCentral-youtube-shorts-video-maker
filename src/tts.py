@@ -26,13 +26,16 @@ DEFAULT_VOICE = "en-US-GuyNeural"
 # ── Script templates ──────────────────────────────────────────────────────────
 
 INTRO_SCRIPTS = [
-    "These are the {n} funniest cat videos on the internet — ranked.",
-    "We found the {n} most hilarious cat clips out there, and ranked them.",
-    "Get ready. Here are the {n} funniest cats on the internet, ranked.",
-    "These cats have been ranked from funny... to absolutely hilarious.",
+    "These are the {n} funniest cat videos on the internet — ranked!",
+    "We found the {n} most hilarious cat clips out there. Let's go!",
+    "Get ready — here are the {n} funniest cats on the internet!",
     "Warning: these {n} cat videos may cause uncontrollable laughter.",
-    "These are the {n} cat videos you need to see — ranked worst to best.",
-    "I ranked {n} of the most viral cat videos on the internet. Here we go.",
+    "These cats are absolutely unhinged. Here are the top {n}!",
+    "You are NOT ready for these {n} cat videos. Let's rank them!",
+    "The funniest cats on the internet — ranked. Number one will break you.",
+    "These {n} cats went completely viral — and you need to see why.",
+    "Cat chaos incoming. Here are {n} clips you can't miss!",
+    "Hold on — these {n} cats are on a completely different level.",
 ]
 
 RANK_LINES: dict[int, list[str]] = {
