@@ -33,9 +33,9 @@ class Config:
         ]
 
         # ── AI visual analysis (optional) ─────────────────────
-        # When set, Claude Vision is used to identify the exact cat action in
+        # When set, Gemini Vision is used to identify the exact cat action in
         # each ranking-video frame so we can find the original standalone clip.
-        self.anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
+        self.gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
 
         # ── Video ──────────────────────────────────────────────
         self.clips_per_video: int = int(os.getenv("CLIPS_PER_VIDEO", "5"))

@@ -499,55 +499,40 @@ class VideoScraper:
             logger.debug(f"Frame extraction failed at {timestamp:.1f}s: {e}")
             return None
 
-    def _describe_frame_claude(
+    def _describe_frame_gemini(
         self, frame_path: Path, api_key: str
     ) -> str | None:
         """
-        Send a frame to Claude Haiku (vision) and get a concise description
+        Send a frame to Gemini Flash (vision) and get a concise description
         of the specific cat action — used as a YouTube search query.
 
         Returns a short string like 'cat falls off shelf' or None on failure.
+        Free tier: 1 500 req/day at aistudio.google.com.
         """
         try:
-            import base64
-            import anthropic
+            import google.generativeai as genai
+
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel("gemini-1.5-flash")
 
             with open(frame_path, "rb") as f:
-                img_b64 = base64.standard_b64encode(f.read()).decode()
+                img_bytes = f.read()
 
-            client = anthropic.Anthropic(api_key=api_key)
-            msg = client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=60,
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/jpeg",
-                                "data": img_b64,
-                            },
-                        },
-                        {
-                            "type": "text",
-                            "text": (
-                                "This is a frame from a viral funny cat video. "
-                                "Describe ONLY the cat's specific action or reaction in 3-6 words, "
-                                "suitable as a YouTube search query to find the original clip. "
-                                "Examples: 'cat falls off counter', 'kitten scared of cucumber', "
-                                "'cat yells at owner'. Reply with just the phrase, nothing else."
-                            ),
-                        },
-                    ],
-                }],
-            )
-            description = msg.content[0].text.strip().lower()
-            logger.info(f"  Claude Vision: '{description}'")
+            response = model.generate_content([
+                {"mime_type": "image/jpeg", "data": img_bytes},
+                (
+                    "This is a frame from a viral funny cat video. "
+                    "Describe ONLY the cat's specific action or reaction in 3-6 words, "
+                    "suitable as a YouTube search query to find the original clip. "
+                    "Examples: 'cat falls off counter', 'kitten scared of cucumber', "
+                    "'cat yells at owner'. Reply with just the phrase, nothing else."
+                ),
+            ])
+            description = response.text.strip().lower()
+            logger.info(f"  Gemini Vision: '{description}'")
             return description
         except Exception as e:
-            logger.debug(f"Claude Vision failed: {e}")
+            logger.debug(f"Gemini Vision failed: {e}")
             return None
 
     # ── Ranking-video mining ──────────────────────────────────────────────────
@@ -709,7 +694,7 @@ class VideoScraper:
 
         # ── Route 3: visual + text search to find the original standalone clips ──
         if not clips:
-            api_key = os.getenv("ANTHROPIC_API_KEY", "")
+            api_key = os.getenv("GEMINI_API_KEY", "")
             rv_duration = info.get("duration") or 0
 
             # Build a list of (query, timestamp_for_frame) pairs.
@@ -741,7 +726,7 @@ class VideoScraper:
 
             logger.info(
                 f"    Route 3: {len(segments)} segments "
-                f"({'Claude Vision' if api_key else 'text-only'})"
+                f"({'Gemini Vision' if api_key else 'text-only'})"
             )
 
             for ch_title, mid_ts in segments[:8]:
@@ -750,7 +735,7 @@ class VideoScraper:
                 if api_key and mid_ts > 0:
                     frame = self._get_frame_at_timestamp(rv["url"], mid_ts)
                     if frame:
-                        visual_query = self._describe_frame_claude(frame, api_key)
+                        visual_query = self._describe_frame_gemini(frame, api_key)
                         try:
                             frame.parent.rmdir()
                         except Exception:
