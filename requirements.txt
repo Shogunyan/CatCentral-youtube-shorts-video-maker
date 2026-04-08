@@ -17,3 +17,7 @@ google-auth-httplib2>=0.2.0
 schedule>=1.2.1
 python-dotenv>=1.0.1
 colorama>=0.4.6
+
+# AI visual analysis — optional, activates frame-based source-clip detection
+# Set ANTHROPIC_API_KEY in .env to enable.  Works fine without it.
+anthropic>=0.40.0

@@ -32,6 +32,11 @@ class Config:
             t.strip() for t in raw_times.split(",") if t.strip()
         ]
 
+        # ── AI visual analysis (optional) ─────────────────────
+        # When set, Claude Vision is used to identify the exact cat action in
+        # each ranking-video frame so we can find the original standalone clip.
+        self.anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
+
         # ── Video ──────────────────────────────────────────────
         self.clips_per_video: int = int(os.getenv("CLIPS_PER_VIDEO", "5"))
         self.clip_duration: int = int(os.getenv("CLIP_DURATION", "25"))

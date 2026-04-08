@@ -175,6 +175,24 @@ class SetupScreen(Screen):
 
             yield Rule()
 
+            yield Static(
+                "Anthropic API Key  (optional — enables AI visual clip detection)",
+                classes="field-label",
+            )
+            yield Static(
+                "  Without this the app works normally.  With it, Claude Vision\n"
+                "  analyses ranking-video frames to find the exact original source\n"
+                "  clip when description links are missing.",
+                classes="help-step",
+            )
+            yield Input(
+                placeholder="sk-ant-…  (leave blank to skip)",
+                password=True,
+                id="inp-anthropic-key",
+            )
+
+            yield Rule()
+
             yield Button(
                 "▶  Authorize YouTube & Save",
                 id="btn-auth",
@@ -193,6 +211,7 @@ class SetupScreen(Screen):
         times = self.query_one("#inp-times", Input).value.strip()
         ig_user = self.query_one("#inp-ig-user", Input).value.strip()
         ig_pass = self.query_one("#inp-ig-pass", Input).value.strip()
+        anthropic_key = self.query_one("#inp-anthropic-key", Input).value.strip()
 
         if not cid or not csecret:
             self._set_status("❌  Client ID and Client Secret are required.", error=True)
@@ -202,13 +221,14 @@ class SetupScreen(Screen):
         btn.disabled = True
         btn.label = "⏳  Browser opening for authorization…"
         self._set_status("🌐  A browser window will open — log in and click Allow.")
-        self._do_auth(cid, csecret, times, ig_user, ig_pass)
+        self._do_auth(cid, csecret, times, ig_user, ig_pass, anthropic_key)
 
     @work(thread=True)
     def _do_auth(
         self,
         cid: str, csecret: str,
         times: str, ig_user: str, ig_pass: str,
+        anthropic_key: str = "",
     ) -> None:
         import threading
         import time
@@ -281,6 +301,7 @@ class SetupScreen(Screen):
                 instagram_username=ig_user,
                 instagram_password=ig_pass,
                 upload_times=times,
+                anthropic_api_key=anthropic_key,
             )
             from config import Config
             from src.uploader import YouTubeUploader

@@ -16,8 +16,11 @@ Strategy:
 """
 import json
 import logging
+import os
 import random
 import re
+import subprocess
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -447,6 +450,106 @@ class VideoScraper:
 
         return clips
 
+    # ── Visual frame analysis (Claude Vision) ────────────────────────────────
+
+    def _get_frame_at_timestamp(
+        self, video_url: str, timestamp: float
+    ) -> Path | None:
+        """
+        Download 4 seconds of video starting at `timestamp` and extract one
+        frame.  Returns a Path to a JPEG file, or None on failure.
+
+        Uses a temp directory that the caller is responsible for cleaning up.
+        """
+        try:
+            tmp_dir  = Path(tempfile.mkdtemp(prefix="catcentral_frame_"))
+            seg_path = tmp_dir / "seg.mp4"
+            frame_path = tmp_dir / "frame.jpg"
+
+            # Download the short segment via yt-dlp
+            ydl_opts = {
+                "quiet": True,
+                "no_warnings": True,
+                "outtmpl": str(seg_path),
+                "format": "worst[ext=mp4]/worst",   # lowest quality — we only need one frame
+                "download_ranges": yt_dlp.utils.download_range_func(
+                    chapters=None,
+                    ranges=[(max(0, timestamp), timestamp + 4)],
+                ),
+                "force_keyframes_at_cuts": True,
+                "socket_timeout": 20,
+                "merge_output_format": "mp4",
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([video_url])
+
+            if not seg_path.exists():
+                return None
+
+            # Extract a single frame with ffmpeg
+            subprocess.run(
+                ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                 "-ss", "1", "-i", str(seg_path),
+                 "-vframes", "1", "-q:v", "3", str(frame_path)],
+                check=True, capture_output=True, timeout=20,
+            )
+            seg_path.unlink(missing_ok=True)
+            return frame_path if frame_path.exists() else None
+        except Exception as e:
+            logger.debug(f"Frame extraction failed at {timestamp:.1f}s: {e}")
+            return None
+
+    def _describe_frame_claude(
+        self, frame_path: Path, api_key: str
+    ) -> str | None:
+        """
+        Send a frame to Claude Haiku (vision) and get a concise description
+        of the specific cat action — used as a YouTube search query.
+
+        Returns a short string like 'cat falls off shelf' or None on failure.
+        """
+        try:
+            import base64
+            import anthropic
+
+            with open(frame_path, "rb") as f:
+                img_b64 = base64.standard_b64encode(f.read()).decode()
+
+            client = anthropic.Anthropic(api_key=api_key)
+            msg = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=60,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/jpeg",
+                                "data": img_b64,
+                            },
+                        },
+                        {
+                            "type": "text",
+                            "text": (
+                                "This is a frame from a viral funny cat video. "
+                                "Describe ONLY the cat's specific action or reaction in 3-6 words, "
+                                "suitable as a YouTube search query to find the original clip. "
+                                "Examples: 'cat falls off counter', 'kitten scared of cucumber', "
+                                "'cat yells at owner'. Reply with just the phrase, nothing else."
+                            ),
+                        },
+                    ],
+                }],
+            )
+            description = msg.content[0].text.strip().lower()
+            logger.info(f"  Claude Vision: '{description}'")
+            return description
+        except Exception as e:
+            logger.debug(f"Claude Vision failed: {e}")
+            return None
+
     # ── Ranking-video mining ──────────────────────────────────────────────────
 
     def _find_ranking_videos(self, min_views: int = RANKING_MIN_VIEWS) -> list[dict]:
@@ -604,57 +707,104 @@ class VideoScraper:
                     "_ranking_views":   rv_views,
                 })
 
-        # ── Route 3: search chapter titles to find the original source clips ──
+        # ── Route 3: visual + text search to find the original standalone clips ──
         if not clips:
-            ch_queries = []
-            for ch in chapters:
-                raw = (ch.get("title") or "").strip()
-                cleaned = re.sub(r'^#?\d+[\.\-:\s]+', '', raw).strip()
-                if len(cleaned) >= 4:
-                    ch_queries.append(f"{cleaned} cat funny original")
+            api_key = os.getenv("ANTHROPIC_API_KEY", "")
+            rv_duration = info.get("duration") or 0
 
-            if not ch_queries:
-                # Fallback: use the ranking video title words as a search
+            # Build a list of (query, timestamp_for_frame) pairs.
+            # If we have chapters, derive queries from chapter titles; otherwise
+            # evenly split the ranking video into segments.
+            segments: list[tuple[str, float]] = []
+            if chapters:
+                for ch in chapters:
+                    raw = (ch.get("title") or "").strip()
+                    cleaned = re.sub(r'^#?\d+[\.\-:\s]+', '', raw).strip()
+                    mid = (
+                        float(ch.get("start_time", 0)) +
+                        float(ch.get("end_time", float(ch.get("start_time", 0)) + 12))
+                    ) / 2
+                    segments.append((cleaned, mid))
+            elif rv_duration >= 10:
+                n = min(5, max(2, int(rv_duration / 12)))
+                for i in range(n):
+                    mid = rv_duration * (i + 0.5) / n
+                    segments.append(("", mid))
+
+            if not segments:
                 words = rv["title"].lower().split()
                 nouns = [w for w in words if len(w) > 3 and w not in {
                     "funniest","ranked","ranking","cats","moments","shorts","funny"
                 }]
                 if nouns:
-                    ch_queries = [f"{' '.join(nouns[:3])} cat funny"]
+                    segments = [(f"{' '.join(nouns[:3])} cat funny", 0.0)]
 
-            logger.info(f"    Searching {len(ch_queries)} chapter-title queries")
-            for cq in ch_queries[:8]:
-                try:
-                    entries = self._ydl_extract_flat(f"ytsearch6:{cq}", playlist_end=6)
-                    for e in entries:
-                        if not e:
-                            continue
-                        vid_id = e.get("id", "")
-                        if not vid_id or vid_id in seen_ids or self._is_used(vid_id):
-                            continue
-                        title = e.get("title", "")
-                        if not _is_cat_video(title) or _is_unwanted(title) or not _is_english(title):
-                            continue
-                        duration = e.get("duration") or 0
-                        if duration and duration > 60:
-                            continue
-                        seen_ids.add(vid_id)
-                        clips.append({
-                            "id":               vid_id,
-                            "url":              f"https://www.youtube.com/watch?v={vid_id}",
-                            "title":            title,
-                            "start_time":       None,
-                            "end_time":         None,
-                            "platform":         "youtube",
-                            "view_count":       e.get("view_count") or 0,
-                            "like_count":       e.get("like_count") or 0,
-                            "duration":         duration,
-                            "_ranking_vid_id":  rv_id,
-                            "_ranking_views":   rv_views,
-                        })
-                        break  # one result per chapter query
-                except Exception as ex:
-                    logger.debug(f"Chapter-title search failed '{cq}': {ex}")
+            logger.info(
+                f"    Route 3: {len(segments)} segments "
+                f"({'Claude Vision' if api_key else 'text-only'})"
+            )
+
+            for ch_title, mid_ts in segments[:8]:
+                # ── Try Claude Vision first if API key is set ──────────────
+                visual_query: str | None = None
+                if api_key and mid_ts > 0:
+                    frame = self._get_frame_at_timestamp(rv["url"], mid_ts)
+                    if frame:
+                        visual_query = self._describe_frame_claude(frame, api_key)
+                        try:
+                            frame.parent.rmdir()
+                        except Exception:
+                            pass
+
+                # Build the search query (visual > chapter title > title words)
+                if visual_query:
+                    queries = [
+                        f"{visual_query} original",
+                        f"{visual_query} shorts",
+                        f"cat {visual_query} funny",
+                    ]
+                elif ch_title:
+                    queries = [f"{ch_title} cat funny original"]
+                else:
+                    continue
+
+                for cq in queries:
+                    try:
+                        entries = self._ydl_extract_flat(f"ytsearch8:{cq}", playlist_end=8)
+                        found_one = False
+                        for e in entries:
+                            if not e:
+                                continue
+                            vid_id = e.get("id", "")
+                            if not vid_id or vid_id in seen_ids or self._is_used(vid_id):
+                                continue
+                            title = e.get("title", "")
+                            if not _is_cat_video(title) or _is_unwanted(title) or not _is_english(title):
+                                continue
+                            duration = e.get("duration") or 0
+                            if duration and duration > 60:
+                                continue
+                            seen_ids.add(vid_id)
+                            clips.append({
+                                "id":               vid_id,
+                                "url":              f"https://www.youtube.com/watch?v={vid_id}",
+                                "title":            title,
+                                "start_time":       None,
+                                "end_time":         None,
+                                "platform":         "youtube",
+                                "view_count":       e.get("view_count") or 0,
+                                "like_count":       e.get("like_count") or 0,
+                                "duration":         duration,
+                                "_ranking_vid_id":  rv_id,
+                                "_ranking_views":   rv_views,
+                                "_visual_matched":  bool(visual_query),
+                            })
+                            found_one = True
+                            break
+                        if found_one:
+                            break
+                    except Exception as ex:
+                        logger.debug(f"Route 3 search failed '{cq}': {ex}")
 
         logger.info(f"    → {len(clips)} source clips extracted")
         return clips
