@@ -88,32 +88,46 @@ _FONT_P = f":fontfile={FONT_PLAIN}"  if FONT_PLAIN  else ""
 _WOOSH_PATH = Path(__file__).parent.parent / "assets" / "sfx" / "woosh.mp3"
 
 
+_WOOSH_VERSION = 2   # bump to force regeneration when synthesis changes
+
+
 def _get_woosh() -> Path | None:
     """Return path to the woosh sound, generating it with ffmpeg if needed."""
-    if _WOOSH_PATH.exists():
+    ver_file = _WOOSH_PATH.with_suffix(".ver")
+    needs_regen = (
+        not _WOOSH_PATH.exists()
+        or not ver_file.exists()
+        or ver_file.read_text().strip() != str(_WOOSH_VERSION)
+    )
+    if not needs_regen:
         return _WOOSH_PATH
     try:
         _WOOSH_PATH.parent.mkdir(parents=True, exist_ok=True)
-        # Rising chirp: frequency sweeps from ~120 Hz to ~1800 Hz over 0.45s
-        # Phase formula: sin(2π·(f0·t + (f1-f0)/(2T)·t²))
-        # (f1-f0)/(2T) = (1680)/(0.9) ≈ 1867
+        # Airy whoosh: pink noise band-passed to the 500–3500 Hz "wind" range,
+        # amplitude-shaped with a sharp attack and a long tail.
+        # The two-stage bandpass removes the harsh high end and the rumbling low
+        # end, leaving the breezy mid-range characteristic of a real whoosh SFX.
         subprocess.run(
             [
                 "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
                 "-f", "lavfi",
-                "-i", (
-                    "aevalsrc="
-                    "0.45*sin(6.283*(120*t+1867*t*t))"
-                    "+0.2*sin(6.283*(240*t+3733*t*t))"
-                    ":s=44100:c=stereo:d=0.45"
+                "-i", "anoisesrc=color=pink:duration=0.7:seed=7",
+                "-af", (
+                    "highpass=f=500,"
+                    "lowpass=f=3500,"
+                    "afade=t=in:d=0.04,"
+                    "afade=t=out:st=0.50:d=0.20,"
+                    "volume=5.0"
                 ),
-                "-af", "afade=t=in:d=0.02,afade=t=out:st=0.36:d=0.09,volume=2.5",
+                "-ar", "44100",
+                "-ac", "2",
                 str(_WOOSH_PATH),
             ],
             check=True,
             capture_output=True,
         )
-        logger.info(f"Generated woosh SFX → {_WOOSH_PATH}")
+        ver_file.write_text(str(_WOOSH_VERSION))
+        logger.info(f"Generated woosh SFX (v{_WOOSH_VERSION}) → {_WOOSH_PATH}")
         return _WOOSH_PATH
     except Exception as e:
         logger.warning(f"Could not generate woosh sound: {e}")
@@ -173,13 +187,23 @@ def _add_woosh_to_clip(
 # ── Ranking overlay ───────────────────────────────────────────────────────────
 
 def _make_short_label(title: str) -> str:
-    """Turn a clip title into a short ALL-CAPS label (≤16 chars)."""
-    # Strip hashtags, URLs, and common filler
+    """Turn a clip title into a 2-word ALL-CAPS sidebar label."""
+    # Strip hashtags, URLs, numbers at the start, and punctuation
     label = re.sub(r"#\w+", "", title).strip()
     label = re.sub(r"https?://\S+", "", label).strip()
-    # Take first 4 words, cap at 16 chars
-    words = label.split()[:4]
-    return " ".join(words)[:16].upper() or "CAT CLIP"
+    label = re.sub(r"^\W+", "", label).strip()
+    # Skip filler words so we surface meaningful content words
+    FILLER = {
+        "the","a","an","of","in","on","at","to","and","or","but","is","it",
+        "this","that","my","your","his","her","cat","cats","kitten","funny",
+        "video","clip","short","shorts","when","how","why","what","who",
+    }
+    words = [w for w in label.split() if w.lower() not in FILLER]
+    if not words:
+        words = label.split()   # fallback: use any words
+    # Two words max
+    chosen = " ".join(words[:2])
+    return chosen[:14].upper() or "CAT CLIP"
 
 
 def _build_ranking_overlay(
@@ -285,8 +309,14 @@ def _process_clip(
     n: int = 5,
 ) -> Path:
     """Scale/crop clip to 1080×1920, trim, and burn in the ranking overlay."""
+    # Normalise SAR first (some downloads carry non-square pixel ratios),
+    # then scale so the video COVERS the full 1080×1920 canvas without black
+    # bars (force_original_aspect_ratio=increase), then centre-crop to exact size.
     scale_crop = (
-        f"scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=increase,"
+        f"setsar=1,"
+        f"scale={TARGET_W}:{TARGET_H}"
+        f":force_original_aspect_ratio=increase"
+        f":flags=lanczos,"
         f"crop={TARGET_W}:{TARGET_H}"
     )
     overlay = _build_ranking_overlay(

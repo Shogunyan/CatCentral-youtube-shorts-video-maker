@@ -59,9 +59,9 @@ def _parse_comment_timestamps(
 
 MAX_CLIP_REUSE = 2
 
-# Max seconds per compilation segment — stays close to clip_duration (20s)
-# so one segment = one cat moment, not two cats crammed together.
-SEGMENT_TARGET_SECS = 21
+# Max seconds per compilation segment.  28s gives enough runway to show the
+# setup AND the punchline without cramming two separate moments together.
+SEGMENT_TARGET_SECS = 28
 
 # ── Dedicated Shorts queries: targets ≤20s funny cat clips ───────────────────
 # These are highly specific searches that reliably surface proper short-form
@@ -179,14 +179,35 @@ _YT_ID_RE = re.compile(
 
 
 def _is_unwanted(title: str) -> bool:
-    """Return True if this video should be skipped (ranking/reaction content)."""
+    """
+    Return True if this video should be skipped.
+
+    Blocks:
+      • Ranking / compilation / reaction meta-content
+      • Non-real-cat content: AI, CGI, filters, animations, costumes, Zoom calls,
+        news clips where humans are using cat filters, etc.
+    """
     if not title:
         return False
     t = title.lower()
     BLOCK = [
+        # Ranking / reaction meta
         "try not to laugh", "react", "reaction",
         "ranked", "ranking", "worst to best", "tier list",
         "#1 to #", "top 10", "top 5", "top 20",
+        # Not a real cat
+        "cat filter", "cat face filter", "zoom filter", "snap filter",
+        "snapchat", "cat costume", "cat suit", "dressed as cat",
+        "cat mask", "cat ears filter",
+        "ai cat", "ai generated", "ai animation",
+        "animated cat", "cartoon cat", "cgi cat", "3d cat",
+        "greenscreen", "green screen",
+        # Human / political content that often slips through (e.g. Zoom-cat-filter
+        # viral congressional hearing clip)
+        "congress", "senator", "hearing", "politician", "lawyer",
+        "zoom call", "zoom meeting", "video call", "on camera filter",
+        # Generic non-cat
+        "dog", "hamster", "rabbit", "bird", "parrot",
     ]
     return any(kw in t for kw in BLOCK)
 
@@ -462,7 +483,8 @@ class VideoScraper:
                     f"  Using {len(selected)} comment-voted timestamps as clip starts"
                 )
                 for ts in selected:
-                    start = ts
+                    # Back up 3s so we see the setup before the punchline
+                    start = max(0.0, ts - 3.0)
                     end = min(start + SEGMENT_TARGET_SECS, duration - 2)
                     clip_id = f"{vid_id}_{int(start)}"
                     if self._is_used(clip_id):
@@ -601,9 +623,10 @@ class VideoScraper:
             duration = clip_entry["duration"]
             ts_list = self._get_comment_timestamps(clip_entry["url"], duration)
             if ts_list:
-                best_start = ts_list[0]
+                # Start 3s BEFORE the crowd-voted peak so the setup is visible
+                best_start = max(0.0, ts_list[0] - 3.0)
                 best_end = min(best_start + SEGMENT_TARGET_SECS, duration - 1)
-                if best_end > best_start + 3:
+                if best_end > best_start + 4:
                     clip_entry["start_time"] = best_start
                     clip_entry["end_time"]   = best_end
                     clip_entry["id"] = f"{clip_entry['id']}_{int(best_start)}"
@@ -848,9 +871,9 @@ class VideoScraper:
                     if duration and 20 < duration <= 60:
                         ts_list = self._get_comment_timestamps(clip["url"], duration)
                         if ts_list:
-                            bs = ts_list[0]
+                            bs = max(0.0, ts_list[0] - 3.0)   # 3s before peak
                             be = min(bs + SEGMENT_TARGET_SECS, duration - 1)
-                            if be > bs + 3:
+                            if be > bs + 4:
                                 clip["start_time"] = bs
                                 clip["end_time"]   = be
                                 clip["id"] = f"{vid_id}_{int(bs)}"
