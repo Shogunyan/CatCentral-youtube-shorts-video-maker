@@ -164,6 +164,18 @@ class SetupScreen(Screen):
             )
             yield Input(value="09:00,14:00,19:00", id="inp-times")
 
+            yield Static("Instagram Username  (optional)", classes="field-label")
+            yield Input(
+                placeholder="leave blank to skip",
+                id="inp-ig-user",
+            )
+            yield Static("Instagram Password  (optional)", classes="field-label")
+            yield Input(
+                placeholder="leave blank to skip",
+                password=True,
+                id="inp-ig-pass",
+            )
+
             yield Rule()
 
             yield Static(
@@ -201,6 +213,8 @@ class SetupScreen(Screen):
         cid = self.query_one("#inp-cid", Input).value.strip()
         csecret = self.query_one("#inp-csecret", Input).value.strip()
         times = self.query_one("#inp-times", Input).value.strip()
+        ig_user = self.query_one("#inp-ig-user", Input).value.strip()
+        ig_pass = self.query_one("#inp-ig-pass", Input).value.strip()
         gemini_key = self.query_one("#inp-gemini-key", Input).value.strip()
 
         if not cid or not csecret:
@@ -211,13 +225,15 @@ class SetupScreen(Screen):
         btn.disabled = True
         btn.label = "⏳  Browser opening for authorization…"
         self._set_status("🌐  A browser window will open — log in and click Allow.")
-        self._do_auth(cid, csecret, times, gemini_key)
+        self._do_auth(cid, csecret, times, ig_user, ig_pass, gemini_key)
 
     @work(thread=True)
     def _do_auth(
         self,
         cid: str, csecret: str,
         times: str,
+        ig_user: str = "",
+        ig_pass: str = "",
         gemini_key: str = "",
     ) -> None:
         import threading
@@ -289,6 +305,8 @@ class SetupScreen(Screen):
                 client_id=cid,
                 client_secret=csecret,
                 upload_times=times,
+                instagram_username=ig_user,
+                instagram_password=ig_pass,
                 gemini_api_key=gemini_key,
             )
             from config import Config

@@ -3,6 +3,7 @@ textual>=0.47.0
 
 # Core scraping & downloading
 yt-dlp>=2024.3.10
+instaloader>=4.10.3      # Instagram Reels scraping (pending Gemini integration)
 
 # Google / YouTube API
 google-api-python-client>=2.126.0

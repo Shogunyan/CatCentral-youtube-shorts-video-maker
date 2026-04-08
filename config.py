@@ -22,6 +22,10 @@ class Config:
         self.google_client_id: str = os.getenv("GOOGLE_CLIENT_ID", "")
         self.google_client_secret: str = os.getenv("GOOGLE_CLIENT_SECRET", "")
 
+        # ── Instagram (optional — scraper pending Gemini integration) ──
+        self.instagram_username: str = os.getenv("INSTAGRAM_USERNAME", "")
+        self.instagram_password: str = os.getenv("INSTAGRAM_PASSWORD", "")
+
         # ── Schedule (instance-level — never shared between instances) ──
         raw_times = os.getenv("UPLOAD_TIMES", "09:00,14:00,19:00")
         self.upload_times: list[str] = [
