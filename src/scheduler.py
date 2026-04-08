@@ -40,15 +40,6 @@ logger = logging.getLogger(__name__)
 _NOOP: Callable = lambda pct, action, log="": None
 
 
-def _make_clip_label(title: str) -> str:
-    """Turn a clip/chapter title into a short punchy ALL-CAPS label (≤16 chars)."""
-    import re
-    label = re.sub(r"#\w+", "", title).strip()
-    label = re.sub(r"https?://\S+", "", label).strip()
-    words = label.split()[:4]
-    result = " ".join(words)[:16]
-    return result.upper() if result else "CAT CLIP"
-
 
 class Pipeline:
     def __init__(
@@ -149,8 +140,8 @@ class Pipeline:
         clip_platforms = [m.get("platform", "unknown") for m, _ in downloaded]
         used_metas = [m for m, _ in downloaded]
 
-        # ── 3. Generate short clip labels for the ranking overlay ────────────
-        clip_labels = [_make_clip_label(m.get("title", "")) for m, _ in downloaded]
+        # ── 3. Pass raw titles — video_editor._make_short_label formats them ──
+        clip_labels = [m.get("title", "") for m, _ in downloaded]
         self._report(46, "✏  Caption ready", f"Title: {title}")
 
         # ── 4. Build video ────────────────────────────────────────────────────

@@ -467,15 +467,27 @@ def _get_video_size(video_path: Path) -> tuple[int, int]:
         return int(parts[0]), int(parts[1])
     except (ValueError, IndexError):
         logger.debug(f"Could not parse video size for {video_path.name}; using defaults")
-        return 1920, 1080
+        return 1080, 1920   # portrait default (Shorts format)
+
+
+def _px(expr: str, iw: int, ih: int) -> int:
+    """
+    Evaluate a simple pixel expression like 'iw-180' or 'iw/2-200'.
+    Only digits, +, -, *, / and parentheses are allowed after variable substitution.
+    """
+    s = str(expr).replace("iw", str(iw)).replace("ih", str(ih))
+    if not re.match(r"^[\d\s+\-*/()]+$", s):
+        return 0
+    try:
+        return int(eval(s))  # noqa: S307 — values are from hardcoded _PLATFORM_BLUR_REGIONS
+    except Exception:
+        return 0
 
 
 def _resolve_region(region: tuple, vw: int, vh: int) -> tuple[int, int, int, int]:
     cx_expr, cy_expr, bw, bh = region
-    cx = int(eval(cx_expr.replace("iw", str(vw)).replace("ih", str(vh))))  # noqa: S307
-    cy = int(eval(cy_expr.replace("iw", str(vw)).replace("ih", str(vh))))  # noqa: S307
-    cx = max(0, min(cx, vw - bw))
-    cy = max(0, min(cy, vh - bh))
+    cx = max(0, min(_px(cx_expr, vw, vh), vw - bw))
+    cy = max(0, min(_px(cy_expr, vw, vh), vh - bh))
     return cx, cy, bw, bh
 
 

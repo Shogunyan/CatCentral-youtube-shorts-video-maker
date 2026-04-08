@@ -1,18 +1,21 @@
 """
-scraper.py — Discovers viral cat clips by extracting segments from popular
-YouTube compilation videos.
+scraper.py — Discovers viral cat clips from proven 1M+ view ranking Shorts.
 
 Strategy:
-  Phase 0a — Dedicated Shorts scraper: aggressively searches for funny cat clips
-              ≤20 seconds using 30+ targeted queries. These are the ideal inputs —
-              the whole video is the funny moment, no slicing required.
-  Phase 0b — Viral ranking sources: find cat ranking Shorts with 500k+ views,
-              extract source clip IDs from descriptions and chapter titles.
-  Phase 1  — Individual viral clips: 5–60s videos, with comment-timestamp peak
-              detection for 20–60s clips to find the funniest window.
-  Phase 2  — Compilation extraction: 1–20 min compilations sliced by chapters or
-              comment timestamps.
-  Phase 3  — Reuse: allow previously-used clips (up to MAX_CLIP_REUSE times).
+  1. Find cat ranking Shorts with ≥ 1M views (falls back to 500K then 100K).
+  2. Analyse up to RANKING_ANALYSE_LIMIT of them; build a cross-reference map
+     so clips appearing in multiple rankings are scored higher.
+  3. Take CLIPS_FROM_FIRST_RANKING clips from the #1 ranking video and
+     CLIPS_FROM_SECOND_RANKING from the #2 ranking video (= 5 total).
+  4. Fill remaining slots from cross-referenced clips, then reusable clips.
+
+Source-clip detection (three routes per ranking video):
+  Route 1 — Description links  → fetch exact source clip metadata from YouTube.
+  Route 2 — Chapters (no links)→ slice the ranking video by chapter timestamps.
+  Route 3a — Gemini Vision      → multi-frame analysis returns per-clip start/end
+                                  and search queries; high-confidence clips slice
+                                  the ranking video directly.
+  Route 3b — Text-only fallback → chapter title search (no Gemini key).
 """
 import json
 import logging
@@ -162,9 +165,6 @@ def _is_cat_video(title: str) -> bool:
         return False
     words = set(re.findall(r"\b[a-z]+\b", title.lower()))
     return bool(words & _CAT_WORDS)
-
-
-_EBU_RE = re.compile(r't:\s+([\d.]+)\s+M:\s+([-\d.]+)')
 
 
 def _is_english(title: str) -> bool:
@@ -563,6 +563,8 @@ class VideoScraper:
                 except Exception:
                     pass
                 finally:
+                    # Must unlink the frame before rmdir — directory must be empty
+                    frame_path.unlink(missing_ok=True)
                     try:
                         frame_path.parent.rmdir()
                     except Exception:
@@ -609,10 +611,11 @@ class VideoScraper:
 
             # Give Gemini the chapter marker context so it can correlate clip
             # boundaries to exact timestamps more accurately.
+            _CH_NUM_RE = re.compile(r"^#?\d+[\.\-:\s]+")
             chapter_hint = ""
             if chapters:
                 ch_str = "; ".join(
-                    f"#{i+1} '{re.sub(chr(94) + r'#?\\d+[.\\-:\\s]+', '', ch.get('title', '').strip())}'"
+                    f"#{i+1} '{_CH_NUM_RE.sub('', ch.get('title', '').strip())}'"
                     f" @{ch.get('start_time', 0):.0f}s"
                     for i, ch in enumerate(chapters[:12])
                 )
@@ -652,10 +655,15 @@ class VideoScraper:
 
             response = model.generate_content(prompt_parts)
             raw = response.text.strip()
-            # Strip markdown code fences if Gemini wraps in ```json … ```
+            # Strip markdown fences then find the first JSON array — Gemini
+            # sometimes prefixes the array with a sentence of prose.
             raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.MULTILINE)
             raw = re.sub(r"\s*```\s*$",        "", raw, flags=re.MULTILINE)
-            raw = raw.strip()
+            bracket = raw.find("[")
+            if bracket == -1:
+                logger.debug("    Gemini: no JSON array in response")
+                return []
+            raw = raw[bracket:]
 
             clips_raw = _json.loads(raw)
             if not isinstance(clips_raw, list):
@@ -863,7 +871,7 @@ class VideoScraper:
             rv_duration = info.get("duration") or 0
             gemini_clips: list[dict] = []
 
-            # ── Route 3a: multi-frame Gemini analysis (API key required) ─────
+                    # ── Route 3a: multi-frame Gemini analysis (API key required) ────
             if api_key and rv_duration >= 10:
                 gemini_clips = self._gemini_analyze_ranking_video(
                     rv["url"], rv_duration, chapters, api_key

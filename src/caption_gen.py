@@ -73,8 +73,6 @@ THEMES = [
     },
 ]
 
-PERIOD_OPTIONS = ["This Week", "This Month", "All Time", "Right Now", "2025"]  # kept for future use
-
 # ── Description templates ─────────────────────────────────────────────────────
 
 DESCRIPTION_INTROS = [

@@ -9,8 +9,8 @@ Priority rules:
 import logging
 import os
 import re
-import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import yt_dlp
@@ -269,9 +269,10 @@ class Downloader:
         Extract a single JPEG frame from a LOCAL video file at `timestamp` seconds.
         Returns raw JPEG bytes, or None on failure.
         """
-        import tempfile
-        tmp = Path(tempfile.mktemp(suffix=".jpg"))
+        fd, tmp_str = tempfile.mkstemp(suffix=".jpg")
+        tmp = Path(tmp_str)
         try:
+            os.close(fd)
             subprocess.run(
                 ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
                  "-ss", f"{timestamp:.3f}", "-i", str(path),
@@ -279,12 +280,11 @@ class Downloader:
                 check=True, capture_output=True, timeout=15,
             )
             if tmp.exists() and tmp.stat().st_size > 0:
-                data = tmp.read_bytes()
-                tmp.unlink(missing_ok=True)
-                return data
+                return tmp.read_bytes()
         except Exception:
             pass
-        tmp.unlink(missing_ok=True)
+        finally:
+            tmp.unlink(missing_ok=True)
         return None
 
     def _gemini_find_action_moment(
@@ -298,7 +298,6 @@ class Downloader:
         """
         try:
             import json as _json
-            import re as _re
             import google.generativeai as genai
 
             genai.configure(api_key=api_key)
@@ -338,11 +337,15 @@ class Downloader:
                 prompt_parts.append(f"\n[Frame at {ts:.1f}s]:")
                 prompt_parts.append({"mime_type": "image/jpeg", "data": fb})
 
-            response  = model.generate_content(prompt_parts)
-            raw       = response.text.strip()
-            raw       = _re.sub(r"^```(?:json)?\s*", "", raw, flags=_re.MULTILINE)
-            raw       = _re.sub(r"\s*```\s*$",        "", raw, flags=_re.MULTILINE)
-            result    = _json.loads(raw.strip())
+            response = model.generate_content(prompt_parts)
+            raw      = response.text.strip()
+            # Strip markdown fences and find the first JSON object
+            raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.MULTILINE)
+            raw = re.sub(r"\s*```\s*$",        "", raw, flags=re.MULTILINE)
+            brace = raw.find("{")
+            if brace == -1:
+                return None
+            result = _json.loads(raw[brace:])
 
             start = float(result["start_time"])
             end   = float(result["end_time"])
