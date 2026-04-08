@@ -535,6 +535,171 @@ class VideoScraper:
             logger.debug(f"Gemini Vision failed: {e}")
             return None
 
+    def _extract_frames_for_analysis(
+        self, video_url: str, duration: float, n_frames: int = 8
+    ) -> list[tuple[float, bytes]]:
+        """
+        Extract N evenly-spaced frames from a video URL.
+        Returns (timestamp_secs, jpeg_bytes) pairs for batch Gemini analysis.
+        Skips the first/last 5% of the video (usually title cards / end screens).
+        """
+        results: list[tuple[float, bytes]] = []
+        if duration < 5 or n_frames < 1:
+            return results
+        margin = max(1.0, duration * 0.05)
+        usable = duration - 2 * margin
+        if usable <= 0:
+            return results
+        timestamps = (
+            [margin + usable * i / max(1, n_frames - 1) for i in range(n_frames)]
+            if n_frames > 1 else [duration / 2]
+        )
+        for ts in timestamps:
+            frame_path = self._get_frame_at_timestamp(video_url, ts)
+            if frame_path:
+                try:
+                    with open(frame_path, "rb") as f:
+                        results.append((ts, f.read()))
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        frame_path.parent.rmdir()
+                    except Exception:
+                        pass
+        return results
+
+    def _gemini_analyze_ranking_video(
+        self,
+        rv_url: str,
+        rv_duration: float,
+        chapters: list[dict],
+        api_key: str,
+    ) -> list[dict]:
+        """
+        Send multiple frames from a ranking video to Gemini in ONE call.
+
+        Gemini identifies each individual cat clip and returns structured data:
+            start_time, end_time          — precise timestamps in the ranking video
+            description                   — what the cat is doing (for logging)
+            search_query                  — YouTube search to find the original clip
+            is_real_cat / is_animated     — content filters
+            view_count_estimate (1-5)     — how viral Gemini thinks this clip is
+            confidence (1-10)             — timestamp accuracy confidence
+
+        High-confidence clips (≥6) are sliced directly; lower confidence clips
+        use search_query to find the original standalone video.
+        """
+        try:
+            import json as _json
+            import google.generativeai as genai
+
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel("gemini-1.5-flash")
+
+            n_frames = min(10, max(4, int(rv_duration / 8)))
+            logger.info(
+                f"    Gemini: extracting {n_frames} frames from "
+                f"{rv_duration:.0f}s ranking video…"
+            )
+            frame_data = self._extract_frames_for_analysis(rv_url, rv_duration, n_frames)
+            if not frame_data:
+                logger.debug("    Gemini: no frames extracted")
+                return []
+
+            # Give Gemini the chapter marker context so it can correlate clip
+            # boundaries to exact timestamps more accurately.
+            chapter_hint = ""
+            if chapters:
+                ch_str = "; ".join(
+                    f"#{i+1} '{re.sub(chr(94) + r'#?\\d+[.\\-:\\s]+', '', ch.get('title', '').strip())}'"
+                    f" @{ch.get('start_time', 0):.0f}s"
+                    for i, ch in enumerate(chapters[:12])
+                )
+                chapter_hint = f"\nChapter markers (use these to anchor boundaries): {ch_str}"
+
+            prompt_parts: list = [
+                f"You are analyzing a YouTube cat ranking/countdown video ({rv_duration:.0f}s long)."
+                f"{chapter_hint}\n\n"
+                f"I am providing {len(frame_data)} frames at these timestamps: "
+                f"{', '.join(f'{t:.1f}s' for t, _ in frame_data)}\n\n"
+                "Identify EACH individual cat clip shown in this ranking video.\n"
+                "For EACH clip return a JSON object with these exact fields:\n"
+                "  start_time: integer seconds from video start (clip begins here)\n"
+                "  end_time: integer seconds from video start (clip ends here)\n"
+                "  description: 10-20 word description of the cat's specific action/reaction\n"
+                "  search_query: 4-8 word YouTube search to find the ORIGINAL standalone clip\n"
+                "  is_real_cat: true only if a LIVE REAL cat (not animated, CGI, or Zoom/camera filter)\n"
+                "  is_animated: true if cartoon, animation, or CGI\n"
+                "  is_english: true if any on-screen text is English, or no text is visible\n"
+                "  view_count_estimate: 1=unknown 2=low 3=medium 4=high 5=extremely viral\n"
+                "  confidence: 1-10 confidence in the timestamp accuracy\n\n"
+                "Rules:\n"
+                "- EXCLUDE any clip where is_real_cat is false or is_animated is true\n"
+                "- EXCLUDE clips that appear to be a human using a cat filter (Zoom, Snapchat, etc.)\n"
+                "- Timestamps must be within 0 and " + str(int(rv_duration)) + "s\n"
+                "- Each clip must be at least 3 seconds long\n"
+                "Reply ONLY with a valid JSON array — no markdown, no extra text.\n"
+                'Example: [{"start_time":0,"end_time":18,'
+                '"description":"orange tabby slides off leather couch in slow motion",'
+                '"search_query":"cat slides off couch funny original",'
+                '"is_real_cat":true,"is_animated":false,"is_english":true,'
+                '"view_count_estimate":4,"confidence":8}]\n',
+            ]
+            for ts, frame_bytes in frame_data:
+                prompt_parts.append(f"\n[Frame at {ts:.1f}s]:")
+                prompt_parts.append({"mime_type": "image/jpeg", "data": frame_bytes})
+
+            response = model.generate_content(prompt_parts)
+            raw = response.text.strip()
+            # Strip markdown code fences if Gemini wraps in ```json … ```
+            raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.MULTILINE)
+            raw = re.sub(r"\s*```\s*$",        "", raw, flags=re.MULTILINE)
+            raw = raw.strip()
+
+            clips_raw = _json.loads(raw)
+            if not isinstance(clips_raw, list):
+                clips_raw = [clips_raw]
+
+            valid: list[dict] = []
+            for item in clips_raw:
+                if not isinstance(item, dict):
+                    continue
+                # Hard content filter — drop animated and non-real-cat clips
+                if item.get("is_animated", False):
+                    continue
+                if not item.get("is_real_cat", True):
+                    continue
+                start = float(item.get("start_time", 0))
+                end   = float(item.get("end_time", start + SEGMENT_TARGET_SECS))
+                if end <= start or (end - start) < 3:
+                    continue
+                # Clamp to video bounds
+                start = max(0.0, min(start, rv_duration))
+                end   = min(end, rv_duration)
+                valid.append({
+                    "start_time":          start,
+                    "end_time":            end,
+                    "description":         str(item.get("description", ""))[:120],
+                    "search_query":        str(item.get("search_query", ""))[:80],
+                    "is_real_cat":         bool(item.get("is_real_cat", True)),
+                    "is_animated":         bool(item.get("is_animated", False)),
+                    "is_english":          bool(item.get("is_english", True)),
+                    "view_count_estimate": int(item.get("view_count_estimate", 1)),
+                    "confidence":          int(item.get("confidence", 5)),
+                })
+
+            # Best clips first: highest confidence, then most viral estimate
+            valid.sort(key=lambda x: (-x["confidence"], -x["view_count_estimate"]))
+            logger.info(
+                f"    Gemini Vision: identified {len(valid)} valid real-cat clips"
+            )
+            return valid
+
+        except Exception as e:
+            logger.debug(f"Gemini ranking analysis failed: {e}")
+            return []
+
     # ── Ranking-video mining ──────────────────────────────────────────────────
 
     def _find_ranking_videos(self, min_views: int = RANKING_MIN_VIEWS) -> list[dict]:
@@ -692,82 +857,168 @@ class VideoScraper:
                     "_ranking_views":   rv_views,
                 })
 
-        # ── Route 3: visual + text search to find the original standalone clips ──
+        # ── Route 3: Gemini Vision analysis + targeted search for originals ────
         if not clips:
-            api_key = os.getenv("GEMINI_API_KEY", "")
+            api_key    = os.getenv("GEMINI_API_KEY", "")
             rv_duration = info.get("duration") or 0
+            gemini_clips: list[dict] = []
 
-            # Build a list of (query, timestamp_for_frame) pairs.
-            # If we have chapters, derive queries from chapter titles; otherwise
-            # evenly split the ranking video into segments.
-            segments: list[tuple[str, float]] = []
-            if chapters:
-                for ch in chapters:
-                    raw = (ch.get("title") or "").strip()
-                    cleaned = re.sub(r'^#?\d+[\.\-:\s]+', '', raw).strip()
-                    mid = (
-                        float(ch.get("start_time", 0)) +
-                        float(ch.get("end_time", float(ch.get("start_time", 0)) + 12))
-                    ) / 2
-                    segments.append((cleaned, mid))
-            elif rv_duration >= 10:
-                n = min(5, max(2, int(rv_duration / 12)))
-                for i in range(n):
-                    mid = rv_duration * (i + 0.5) / n
-                    segments.append(("", mid))
+            # ── Route 3a: multi-frame Gemini analysis (API key required) ─────
+            if api_key and rv_duration >= 10:
+                gemini_clips = self._gemini_analyze_ranking_video(
+                    rv["url"], rv_duration, chapters, api_key
+                )
 
-            if not segments:
-                words = rv["title"].lower().split()
-                nouns = [w for w in words if len(w) > 3 and w not in {
-                    "funniest","ranked","ranking","cats","moments","shorts","funny"
-                }]
-                if nouns:
-                    segments = [(f"{' '.join(nouns[:3])} cat funny", 0.0)]
+            if gemini_clips:
+                logger.info(
+                    f"    Route 3a (Gemini Vision): "
+                    f"processing {len(gemini_clips)} identified clips"
+                )
+                for gc in gemini_clips:
+                    start      = gc["start_time"]
+                    end        = gc["end_time"]
+                    confidence = gc["confidence"]
+                    sq         = gc["search_query"]
+                    clip_id_g  = f"{rv_id}_{int(start)}"
 
-            logger.info(
-                f"    Route 3: {len(segments)} segments "
-                f"({'Gemini Vision' if api_key else 'text-only'})"
-            )
+                    if clip_id_g in seen_ids or self._is_used(clip_id_g):
+                        continue
+                    seen_ids.add(clip_id_g)
 
-            for ch_title, mid_ts in segments[:8]:
-                # ── Try Claude Vision first if API key is set ──────────────
-                visual_query: str | None = None
-                if api_key and mid_ts > 0:
-                    frame = self._get_frame_at_timestamp(rv["url"], mid_ts)
-                    if frame:
-                        visual_query = self._describe_frame_gemini(frame, api_key)
-                        try:
-                            frame.parent.rmdir()
-                        except Exception:
-                            pass
+                    if confidence >= 6:
+                        # High confidence — Gemini knows exactly where this clip
+                        # is in the ranking video; slice it directly.
+                        clips.append({
+                            "id":                 clip_id_g,
+                            "url":                rv["url"],
+                            "title":              gc["description"][:60] or rv["title"][:30],
+                            "start_time":         start,
+                            "end_time":           min(end, start + SEGMENT_TARGET_SECS),
+                            "platform":           "youtube",
+                            "view_count":         rv_views,
+                            "like_count":         0,
+                            "duration":           end - start,
+                            "_ranking_vid_id":    rv_id,
+                            "_ranking_views":     rv_views,
+                            "_gemini_detected":   True,
+                            "_gemini_confidence": confidence,
+                            "_view_estimate":     gc["view_count_estimate"],
+                        })
+                        logger.debug(
+                            f"      @{start:.0f}s–{end:.0f}s  "
+                            f"conf={confidence}  viral={gc['view_count_estimate']}  "
+                            f"→ direct slice"
+                        )
 
-                # Build the search query (visual > chapter title > title words)
-                if visual_query:
-                    queries = [
-                        f"{visual_query} original",
-                        f"{visual_query} shorts",
-                        f"cat {visual_query} funny",
-                    ]
-                elif ch_title:
-                    queries = [f"{ch_title} cat funny original"]
-                else:
-                    continue
-
-                for cq in queries:
-                    try:
-                        entries = self._ydl_extract_flat(f"ytsearch8:{cq}", playlist_end=8)
+                    elif sq:
+                        # Lower confidence timestamps — use Gemini's search_query
+                        # to find the original standalone clip on YouTube.
                         found_one = False
+                        for cq in [f"{sq} original", f"{sq} funny cat", sq]:
+                            if found_one:
+                                break
+                            try:
+                                entries = self._ydl_extract_flat(
+                                    f"ytsearch5:{cq}", playlist_end=5
+                                )
+                                for e in entries:
+                                    if not e:
+                                        continue
+                                    vid_id = e.get("id", "")
+                                    if (not vid_id or vid_id in seen_ids
+                                            or self._is_used(vid_id)):
+                                        continue
+                                    title = e.get("title", "")
+                                    if (not _is_cat_video(title)
+                                            or _is_unwanted(title)
+                                            or not _is_english(title)):
+                                        continue
+                                    dur = e.get("duration") or 0
+                                    if dur and dur > 90:
+                                        continue
+                                    views = e.get("view_count") or 0
+                                    # Require at least 10K views — clips featured
+                                    # in viral rankings should have some traction.
+                                    if views > 0 and views < 10_000:
+                                        continue
+                                    seen_ids.add(vid_id)
+                                    clips.append({
+                                        "id":               vid_id,
+                                        "url":              f"https://www.youtube.com/watch?v={vid_id}",
+                                        "title":            title,
+                                        "start_time":       None,
+                                        "end_time":         None,
+                                        "platform":         "youtube",
+                                        "view_count":       views,
+                                        "like_count":       e.get("like_count") or 0,
+                                        "duration":         dur,
+                                        "_ranking_vid_id":  rv_id,
+                                        "_ranking_views":   rv_views,
+                                        "_visual_matched":  True,
+                                        "_gemini_detected": True,
+                                    })
+                                    found_one = True
+                                    break
+                            except Exception as ex:
+                                logger.debug(f"Route 3a search failed '{cq}': {ex}")
+
+            else:
+                # ── Route 3b: text-only fallback (no API key / Gemini failed) ─
+                segments: list[tuple[str, float]] = []
+                if chapters:
+                    for ch in chapters:
+                        raw = (ch.get("title") or "").strip()
+                        cleaned = re.sub(r'^#?\d+[\.\-:\s]+', '', raw).strip()
+                        mid = (
+                            float(ch.get("start_time", 0)) +
+                            float(ch.get("end_time",
+                                         float(ch.get("start_time", 0)) + 12))
+                        ) / 2
+                        segments.append((cleaned, mid))
+                elif rv_duration >= 10:
+                    n = min(5, max(2, int(rv_duration / 12)))
+                    for i in range(n):
+                        mid = rv_duration * (i + 0.5) / n
+                        segments.append(("", mid))
+
+                if not segments:
+                    words = rv["title"].lower().split()
+                    nouns = [
+                        w for w in words if len(w) > 3
+                        and w not in {
+                            "funniest", "ranked", "ranking", "cats",
+                            "moments", "shorts", "funny",
+                        }
+                    ]
+                    if nouns:
+                        segments = [(f"{' '.join(nouns[:3])} cat funny", 0.0)]
+
+                logger.info(f"    Route 3b (text-only): {len(segments)} segments")
+
+                for ch_title, _ in segments[:8]:
+                    if not ch_title:
+                        continue
+                    try:
+                        entries = self._ydl_extract_flat(
+                            f"ytsearch8:{ch_title} cat funny original",
+                            playlist_end=8,
+                        )
                         for e in entries:
                             if not e:
                                 continue
                             vid_id = e.get("id", "")
-                            if not vid_id or vid_id in seen_ids or self._is_used(vid_id):
+                            if (not vid_id or vid_id in seen_ids
+                                    or self._is_used(vid_id)):
                                 continue
                             title = e.get("title", "")
-                            if not _is_cat_video(title) or _is_unwanted(title) or not _is_english(title):
+                            if (not _is_cat_video(title) or _is_unwanted(title)
+                                    or not _is_english(title)):
                                 continue
-                            duration = e.get("duration") or 0
-                            if duration and duration > 60:
+                            dur = e.get("duration") or 0
+                            if dur and dur > 90:
+                                continue
+                            views = e.get("view_count") or 0
+                            if views > 0 and views < 10_000:
                                 continue
                             seen_ids.add(vid_id)
                             clips.append({
@@ -777,19 +1028,16 @@ class VideoScraper:
                                 "start_time":       None,
                                 "end_time":         None,
                                 "platform":         "youtube",
-                                "view_count":       e.get("view_count") or 0,
+                                "view_count":       views,
                                 "like_count":       e.get("like_count") or 0,
-                                "duration":         duration,
+                                "duration":         dur,
                                 "_ranking_vid_id":  rv_id,
                                 "_ranking_views":   rv_views,
-                                "_visual_matched":  bool(visual_query),
+                                "_visual_matched":  False,
                             })
-                            found_one = True
-                            break
-                        if found_one:
                             break
                     except Exception as ex:
-                        logger.debug(f"Route 3 search failed '{cq}': {ex}")
+                        logger.debug(f"Route 3b search failed '{ch_title}': {ex}")
 
         logger.info(f"    → {len(clips)} source clips extracted")
         return clips

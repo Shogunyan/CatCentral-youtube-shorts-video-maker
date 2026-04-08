@@ -7,6 +7,7 @@ Priority rules:
   • Instagram→ best quality via yt-dlp
 """
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -263,29 +264,149 @@ class Downloader:
             logger.debug(f"Peak audio detection failed for {path.name}: {e}")
         return None
 
+    def _extract_frame_at_local(self, path: Path, timestamp: float) -> bytes | None:
+        """
+        Extract a single JPEG frame from a LOCAL video file at `timestamp` seconds.
+        Returns raw JPEG bytes, or None on failure.
+        """
+        import tempfile
+        tmp = Path(tempfile.mktemp(suffix=".jpg"))
+        try:
+            subprocess.run(
+                ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                 "-ss", f"{timestamp:.3f}", "-i", str(path),
+                 "-vframes", "1", "-q:v", "3", str(tmp)],
+                check=True, capture_output=True, timeout=15,
+            )
+            if tmp.exists() and tmp.stat().st_size > 0:
+                data = tmp.read_bytes()
+                tmp.unlink(missing_ok=True)
+                return data
+        except Exception:
+            pass
+        tmp.unlink(missing_ok=True)
+        return None
+
+    def _gemini_find_action_moment(
+        self, path: Path, duration: float, api_key: str
+    ) -> tuple[float, float] | None:
+        """
+        Sample frames from a downloaded clip and ask Gemini Vision to identify
+        the best window (start, end) that captures the peak action/funny moment.
+
+        Returns (start_secs, end_secs) trimmed to [0, duration], or None on failure.
+        """
+        try:
+            import json as _json
+            import re as _re
+            import google.generativeai as genai
+
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel("gemini-1.5-flash")
+
+            target   = getattr(self.config, "clip_duration", 25)
+            n_frames = min(8, max(3, int(duration / 5)))
+            margin   = max(1.0, duration * 0.05)
+            usable   = duration - 2 * margin
+            if usable <= 0:
+                return None
+
+            timestamps = (
+                [margin + usable * i / max(1, n_frames - 1) for i in range(n_frames)]
+                if n_frames > 1 else [duration / 2]
+            )
+            frame_data: list[tuple[float, bytes]] = []
+            for ts in timestamps:
+                fb = self._extract_frame_at_local(path, ts)
+                if fb:
+                    frame_data.append((ts, fb))
+
+            if len(frame_data) < 2:
+                return None
+
+            prompt_parts: list = [
+                f"These frames come from a funny cat video clip ({duration:.0f}s total).\n"
+                f"I want to keep only the best {target}s window containing the "
+                "peak funny or action-packed moment.\n"
+                f"Frames sampled at: {', '.join(f'{t:.1f}s' for t, _ in frame_data)}\n\n"
+                f"Reply ONLY with JSON: {{\"start_time\": X, \"end_time\": Y}}\n"
+                f"Constraints: Y - X == {target}, X >= 0, Y <= {duration:.1f}.\n"
+                "Choose the window that best captures the cat's funniest or most "
+                "dramatic moment.\n",
+            ]
+            for ts, fb in frame_data:
+                prompt_parts.append(f"\n[Frame at {ts:.1f}s]:")
+                prompt_parts.append({"mime_type": "image/jpeg", "data": fb})
+
+            response  = model.generate_content(prompt_parts)
+            raw       = response.text.strip()
+            raw       = _re.sub(r"^```(?:json)?\s*", "", raw, flags=_re.MULTILINE)
+            raw       = _re.sub(r"\s*```\s*$",        "", raw, flags=_re.MULTILINE)
+            result    = _json.loads(raw.strip())
+
+            start = float(result["start_time"])
+            end   = float(result["end_time"])
+
+            if end <= start or (end - start) < target * 0.5:
+                return None
+            start = max(0.0, start)
+            end   = min(duration, end)
+
+            logger.info(
+                f"  Gemini action: {path.name} → [{start:.1f}s – {end:.1f}s]"
+            )
+            return start, end
+
+        except Exception as e:
+            logger.debug(f"Gemini action moment failed for {path.name}: {e}")
+            return None
+
     def _trim_to_action(self, path: Path) -> None:
         """
-        If the clip is significantly longer than clip_duration, detect the
-        peak audio moment and trim to [peak - 3s, peak - 3s + clip_duration].
-        Uses stream-copy (no re-encode) — fast and lossless for this stage.
+        If the clip is significantly longer than clip_duration, find the peak
+        action moment and trim to that window.
+
+        Detection order:
+          1. Gemini Vision  — samples frames, asks Gemini for the best window
+                             (requires GEMINI_API_KEY; visually accurate)
+          2. Audio peak     — EBU R128 loudness scan, centres on loudest moment
+                             (always available; good fallback)
+
+        Uses stream-copy (no re-encode) — fast and lossless.
         Modifies the file in place.  Silent failures are logged and ignored.
         """
-        target = getattr(self.config, "clip_duration", 25)
+        target   = getattr(self.config, "clip_duration", 25)
         duration = self._probe_duration(path)
         # Only trim if the clip is more than 8s longer than the target
         if not duration or duration <= target + 8:
             return
 
-        peak = self._detect_peak_audio(path, duration)
-        if peak is None:
+        # ── 1. Gemini Vision (preferred) ──────────────────────────────────────
+        api_key = os.getenv("GEMINI_API_KEY", "")
+        action_window: tuple[float, float] | None = None
+        if api_key:
+            action_window = self._gemini_find_action_moment(path, duration, api_key)
+
+        # ── 2. Audio peak fallback ─────────────────────────────────────────────
+        if action_window is None:
+            peak = self._detect_peak_audio(path, duration)
+            if peak is not None:
+                start = max(0.0, peak - 3.0)
+                action_window = (start, start + target)
+
+        if action_window is None:
             return
 
-        start = max(0.0, peak - 3.0)
-        tmp   = path.with_name(f"__act_{path.name}")
+        start    = action_window[0]
+        trim_dur = min(target, duration - start)
+        if trim_dur < MIN_DURATION:
+            return
+
+        tmp = path.with_name(f"__act_{path.name}")
         try:
             subprocess.run(
                 ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                 "-ss", f"{start:.3f}", "-t", str(target),
+                 "-ss", f"{start:.3f}", "-t", f"{trim_dur:.3f}",
                  "-i", str(path),
                  "-c", "copy", str(tmp)],
                 check=True, capture_output=True, timeout=60,
@@ -294,7 +415,7 @@ class Downloader:
             tmp.rename(path)
             logger.info(
                 f"  Action trim: {path.name} → "
-                f"[{start:.1f}s – {start + target:.1f}s]  "
+                f"[{start:.1f}s – {start + trim_dur:.1f}s]  "
                 f"(was {duration:.0f}s)"
             )
         except Exception as e:
