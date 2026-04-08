@@ -58,13 +58,26 @@ class AuthStatus(Message):
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _next_upload_str(upload_times: list[str]) -> str:
+    if not upload_times:
+        return "No upload times configured"
     now = datetime.datetime.now()
-    for t in sorted(upload_times):
-        h, m = map(int, t.split(":"))
+    valid: list[str] = []
+    for t in upload_times:
+        try:
+            parts = t.strip().split(":")
+            if len(parts) >= 2:
+                int(parts[0]); int(parts[1])
+                valid.append(t.strip())
+        except (ValueError, IndexError):
+            pass
+    if not valid:
+        return "Upload times invalid — check Settings"
+    for t in sorted(valid):
+        h, m = int(t.split(":")[0]), int(t.split(":")[1])
         scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
         if scheduled > now:
             return f"Next upload: {t}"
-    first = sorted(upload_times)[0]
+    first = sorted(valid)[0]
     return f"Next upload: {first}  (tomorrow)"
 
 
@@ -197,6 +210,42 @@ class SetupScreen(Screen):
         cid: str, csecret: str,
         times: str, ig_user: str, ig_pass: str,
     ) -> None:
+        import threading
+        import time
+        _URL_FILE = "/tmp/catcentral_auth_url.txt"
+
+        # Clear any stale URL file before starting
+        try:
+            import os
+            if os.path.exists(_URL_FILE):
+                os.remove(_URL_FILE)
+        except Exception:
+            pass
+
+        _auth_done = threading.Event()
+
+        def _url_watcher() -> None:
+            """Poll for the auth URL and post it to the status widget."""
+            import os
+            for _ in range(60):          # max ~30s of polling
+                if _auth_done.is_set():
+                    return
+                time.sleep(0.5)
+                try:
+                    if os.path.exists(_URL_FILE):
+                        with open(_URL_FILE) as f:
+                            url = f.read().strip()
+                        if url:
+                            self.app.call_from_thread(
+                                self._set_status,
+                                f"🌐  Browser didn't open? Copy this URL:\n{url}",
+                            )
+                            return
+                except Exception:
+                    pass
+
+        watcher = threading.Thread(target=_url_watcher, daemon=True)
+        watcher.start()
         try:
             from setup_wizard import _write_env
             _write_env(
@@ -216,6 +265,8 @@ class SetupScreen(Screen):
             )
         except Exception as e:
             self.post_message(AuthStatus(success=False, detail=str(e)))
+        finally:
+            _auth_done.set()
 
     @on(AuthStatus)
     def on_auth_result(self, msg: AuthStatus) -> None:
@@ -561,9 +612,11 @@ Input:focus {
 
 #setup-status {
     text-align: center;
-    height: 2;
+    height: auto;
+    min-height: 2;
     margin: 1 0;
     padding: 0;
+    overflow: auto;
 }
 
 .status-ok {

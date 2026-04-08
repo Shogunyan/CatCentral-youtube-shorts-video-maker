@@ -432,8 +432,12 @@ def _get_video_size(video_path: Path) -> tuple[int, int]:
          "-show_entries", "stream=width,height", "-of", "csv=p=0", str(video_path)],
         capture_output=True, text=True,
     )
-    w, h = result.stdout.strip().split(",")
-    return int(w), int(h)
+    try:
+        parts = result.stdout.strip().split(",")
+        return int(parts[0]), int(parts[1])
+    except (ValueError, IndexError):
+        logger.debug(f"Could not parse video size for {video_path.name}; using defaults")
+        return 1920, 1080
 
 
 def _resolve_region(region: tuple, vw: int, vh: int) -> tuple[int, int, int, int]:

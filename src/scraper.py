@@ -314,6 +314,7 @@ class VideoScraper:
             "ignoreerrors": True,
             "nocheckcertificate": True,
             "skip_download": True,
+            "socket_timeout": 20,
         }
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -418,6 +419,9 @@ class VideoScraper:
             for ch in chapters:
                 start = float(ch.get("start_time", 0))
                 end = float(ch.get("end_time", start + SEGMENT_TARGET_SECS))
+                # Guard: malformed chapter data can have start >= video duration
+                if duration and start >= duration:
+                    continue
                 seg_len = end - start
                 # Skip chapters that are too short (<3s) or too long (>45s per clip)
                 if seg_len < 3 or seg_len > 45:
@@ -542,6 +546,10 @@ class VideoScraper:
 
         These are complete videos (5–60s) where the whole clip is the funny
         moment — no slicing needed and no risk of grabbing two cats in one slot.
+
+        Comment-timestamp peak detection is deferred to post-processing on the
+        top 8 mid-length candidates only, to avoid 50+ sequential HTTP fetches
+        that would stall the pipeline for many minutes.
         """
         all_videos: list[dict] = []
         q_list = queries or random.sample(VIRAL_CAT_QUERIES, min(8, len(VIRAL_CAT_QUERIES)))
@@ -565,7 +573,7 @@ class VideoScraper:
                         continue
                     if _is_unwanted(title):
                         continue
-                    clip_entry: dict = {
+                    all_videos.append({
                         "id":         vid_id,
                         "url":        f"https://www.youtube.com/watch?v={vid_id}",
                         "title":      title,
@@ -575,30 +583,37 @@ class VideoScraper:
                         "view_count": e.get("view_count") or 0,
                         "like_count": e.get("like_count") or 0,
                         "duration":   duration,
-                    }
-                    # For mid-length clips (20–60s), use comment timestamps to
-                    # pinpoint the peak funny moment before queueing for download.
-                    if duration and 20 <= duration <= 60:
-                        ts_list = self._get_comment_timestamps(clip_entry["url"], duration)
-                        if ts_list:
-                            best_start = ts_list[0]
-                            best_end = min(
-                                best_start + SEGMENT_TARGET_SECS,
-                                duration - 1,
-                            )
-                            if best_end > best_start + 3:
-                                clip_entry["start_time"] = best_start
-                                clip_entry["end_time"]   = best_end
-                                clip_entry["id"] = f"{vid_id}_{int(best_start)}"
-                                logger.info(
-                                    f"  Peak moment {vid_id}: "
-                                    f"{best_start:.1f}s–{best_end:.1f}s "
-                                    f"({len(ts_list)} comment votes)"
-                                )
-                    all_videos.append(clip_entry)
+                    })
             except Exception as e:
                 logger.warning(f"Individual clip query failed '{q}': {e}")
-        return sorted(all_videos, key=lambda x: x["view_count"], reverse=True)
+
+        # Sort by views so we post-process the best candidates first
+        all_videos.sort(key=lambda x: x["view_count"], reverse=True)
+
+        # Post-process: use comment timestamps for the top mid-length clips only.
+        # Limit to 8 fetches max to keep total extra latency under ~60s.
+        mid_length = [v for v in all_videos if v["duration"] and 20 <= v["duration"] <= 60]
+        logger.info(
+            f"  Comment-timestamp peak detection on top "
+            f"{min(8, len(mid_length))}/{len(mid_length)} mid-length clips…"
+        )
+        for clip_entry in mid_length[:8]:
+            duration = clip_entry["duration"]
+            ts_list = self._get_comment_timestamps(clip_entry["url"], duration)
+            if ts_list:
+                best_start = ts_list[0]
+                best_end = min(best_start + SEGMENT_TARGET_SECS, duration - 1)
+                if best_end > best_start + 3:
+                    clip_entry["start_time"] = best_start
+                    clip_entry["end_time"]   = best_end
+                    clip_entry["id"] = f"{clip_entry['id']}_{int(best_start)}"
+                    logger.info(
+                        f"  Peak moment {clip_entry['id']}: "
+                        f"{best_start:.1f}s–{best_end:.1f}s "
+                        f"({len(ts_list)} comment votes)"
+                    )
+
+        return all_videos
 
     # ── Dedicated Shorts scraper (≤20s clips) ────────────────────────────────
 
@@ -637,6 +652,8 @@ class VideoScraper:
                         continue
                     seen.add(vid_id)
                     # Unknown duration (many Shorts report 0) — verify with full fetch
+                    view_count = e.get("view_count") or 0
+                    like_count = e.get("like_count") or 0
                     if not duration:
                         info = self._ydl_get_info(
                             f"https://www.youtube.com/watch?v={vid_id}"
@@ -649,6 +666,9 @@ class VideoScraper:
                         title = info.get("title") or title
                         if not _is_cat_video(title):
                             continue
+                        # Prefer the richer view/like counts from the full fetch
+                        view_count = info.get("view_count") or view_count
+                        like_count = info.get("like_count") or like_count
 
                     found.append({
                         "id":         vid_id,
@@ -657,8 +677,8 @@ class VideoScraper:
                         "start_time": None,
                         "end_time":   None,
                         "platform":   "youtube",
-                        "view_count": e.get("view_count") or 0,
-                        "like_count": e.get("like_count") or 0,
+                        "view_count": view_count,
+                        "like_count": like_count,
                         "duration":   duration,
                         "_shorts":    True,
                     })
@@ -954,7 +974,16 @@ class VideoScraper:
 
         target = max(want * 3, 20)
         pool = combined[:target]
-        random.shuffle(pool)
+
+        # Shuffle WITHIN each tier so the same clips don't always appear first,
+        # but preserve the inter-tier priority ordering (Tier 0 before Tier 1, etc.)
+        from itertools import groupby
+        shuffled: list[dict] = []
+        for _, group in groupby(pool, key=_tier):
+            tier_clips = list(group)
+            random.shuffle(tier_clips)
+            shuffled.extend(tier_clips)
+        pool = shuffled
 
         logger.info(f"Returning {len(pool)} candidates total")
         return pool

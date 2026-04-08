@@ -153,6 +153,16 @@ class Downloader:
 
             downloaded = self._find_existing(vid_id)
             if downloaded:
+                # Check segment duration — yt-dlp can produce near-zero clips
+                # for keyframe-aligned ranges that don't contain any frames.
+                from src.tts import get_audio_duration as _dur
+                seg_dur = _dur(downloaded)
+                if seg_dur < MIN_DURATION:
+                    logger.warning(
+                        f"Segment too short ({seg_dur:.1f}s < {MIN_DURATION}s), skipping {vid_id}"
+                    )
+                    self._cleanup(vid_id)
+                    return None
                 h = _probe_height(downloaded)
                 if h and h < MIN_CLIP_HEIGHT:
                     logger.warning(

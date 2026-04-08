@@ -242,7 +242,6 @@ class VideoTracker:
         the dashboard log when the app starts.
         """
         lines = []
-        now = _utcnow()
 
         for yt_id, data in self._db.items():
             title = data.get("title", "unknown")[:45]
