@@ -14,6 +14,9 @@ from pathlib import Path
 
 import yt_dlp
 
+# Regex for parsing ffmpeg ebur128 loudness lines
+_EBU_RE = re.compile(r't:\s+([\d.]+)\s+M:\s+([-\d.]+)')
+
 logger = logging.getLogger(__name__)
 
 # Minimum acceptable clip duration in seconds
@@ -155,9 +158,8 @@ class Downloader:
             if downloaded:
                 # Check segment duration — yt-dlp can produce near-zero clips
                 # for keyframe-aligned ranges that don't contain any frames.
-                from src.tts import get_audio_duration as _dur
-                seg_dur = _dur(downloaded)
-                if seg_dur < MIN_DURATION:
+                seg_dur = self._probe_duration(downloaded)
+                if seg_dur and seg_dur < MIN_DURATION:
                     logger.warning(
                         f"Segment too short ({seg_dur:.1f}s < {MIN_DURATION}s), skipping {vid_id}"
                     )
@@ -188,6 +190,7 @@ class Downloader:
     def download_batch(self, videos: list[dict], target: int) -> list[tuple[dict, Path]]:
         """
         Download from `videos` list until we have `target` successful clips.
+        After each download, trim long clips to the detected peak action moment.
         Returns list of (video_meta, local_path) tuples.
         """
         results: list[tuple[dict, Path]] = []
@@ -196,12 +199,107 @@ class Downloader:
                 break
             path = self.download(video)
             if path:
+                self._trim_to_action(path)
                 results.append((video, path))
         if len(results) < target:
             logger.warning(
                 f"Only got {len(results)}/{target} clips after trying {len(videos)} candidates"
             )
         return results
+
+    # ── Action-moment detection ────────────────────────────────────────────────
+
+    def _probe_duration(self, path: Path) -> float:
+        """Return the duration of a video file in seconds, or 0 on failure."""
+        try:
+            r = subprocess.run(
+                ["ffprobe", "-v", "error",
+                 "-show_entries", "format=duration",
+                 "-of", "csv=p=0", str(path)],
+                capture_output=True, text=True, timeout=10,
+            )
+            return float(r.stdout.strip())
+        except Exception:
+            return 0.0
+
+    def _detect_peak_audio(self, path: Path, duration: float) -> float | None:
+        """
+        Single-pass EBU R128 loudness scan to find the peak action moment.
+        Returns the timestamp of the loudest 100ms window, or None on failure.
+        The caller should start the clip 3s before this timestamp.
+        """
+        if duration <= 0:
+            return None
+        try:
+            r = subprocess.run(
+                ["ffmpeg", "-hide_banner",
+                 "-i", str(path),
+                 "-af", "ebur128=peak=true",
+                 "-vn", "-f", "null", "-"],
+                capture_output=True, text=True, timeout=120,
+            )
+            best_t   = 0.0
+            best_m   = -999.0
+            for line in r.stderr.split("\n"):
+                m = _EBU_RE.search(line)
+                if not m:
+                    continue
+                t      = float(m.group(1))
+                lufs   = float(m.group(2))
+                # Ignore silent head/tail (first/last 2s of typical cat clips
+                # are often just ambient noise before anything happens)
+                if t < 2 or t > duration - 2:
+                    continue
+                if lufs > best_m:
+                    best_m = lufs
+                    best_t = t
+            if best_m > -999.0:
+                logger.debug(
+                    f"  Peak audio at {best_t:.1f}s ({best_m:.1f} LUFS) "
+                    f"for {path.name}"
+                )
+                return best_t
+        except Exception as e:
+            logger.debug(f"Peak audio detection failed for {path.name}: {e}")
+        return None
+
+    def _trim_to_action(self, path: Path) -> None:
+        """
+        If the clip is significantly longer than clip_duration, detect the
+        peak audio moment and trim to [peak - 3s, peak - 3s + clip_duration].
+        Uses stream-copy (no re-encode) — fast and lossless for this stage.
+        Modifies the file in place.  Silent failures are logged and ignored.
+        """
+        target = getattr(self.config, "clip_duration", 25)
+        duration = self._probe_duration(path)
+        # Only trim if the clip is more than 8s longer than the target
+        if not duration or duration <= target + 8:
+            return
+
+        peak = self._detect_peak_audio(path, duration)
+        if peak is None:
+            return
+
+        start = max(0.0, peak - 3.0)
+        tmp   = path.with_name(f"__act_{path.name}")
+        try:
+            subprocess.run(
+                ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                 "-ss", f"{start:.3f}", "-t", str(target),
+                 "-i", str(path),
+                 "-c", "copy", str(tmp)],
+                check=True, capture_output=True, timeout=60,
+            )
+            path.unlink()
+            tmp.rename(path)
+            logger.info(
+                f"  Action trim: {path.name} → "
+                f"[{start:.1f}s – {start + target:.1f}s]  "
+                f"(was {duration:.0f}s)"
+            )
+        except Exception as e:
+            logger.debug(f"Action trim failed for {path.name}: {e}")
+            tmp.unlink(missing_ok=True)
 
     # ── yt-dlp options per platform ───────────────────────────────────────────
 

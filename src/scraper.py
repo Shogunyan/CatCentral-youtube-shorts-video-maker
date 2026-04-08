@@ -59,117 +59,47 @@ def _parse_comment_timestamps(
 
 MAX_CLIP_REUSE = 2
 
-# Max seconds per compilation segment.  28s gives enough runway to show the
-# setup AND the punchline without cramming two separate moments together.
+# Seconds of source clip kept around each detected peak moment.
 SEGMENT_TARGET_SECS = 28
 
-# ── Dedicated Shorts queries: targets ≤20s funny cat clips ───────────────────
-# These are highly specific searches that reliably surface proper short-form
-# cat clips where the whole video IS the funny moment.
-SHORT_CAT_QUERIES = [
-    # Reaction / surprise moments
-    "cat jumpscare reaction original shorts",
-    "cat scared suddenly funny shorts",
-    "cat surprised face shorts",
-    "cat shocked by owner shorts",
-    "cat attacks feet funny shorts",
-    "cat slaps dog funny shorts",
-    "cat hissing at mirror shorts",
-    "cat bites owner funny shorts",
-    # Behaviour / physics moments
-    "cat zoomies 3am shorts",
-    "cat falls off shelf funny",
-    "cat fails jump funny shorts",
-    "cat knocks glass off table shorts",
-    "cat derp face funny shorts",
-    "kitten discovers stairs shorts",
-    "cat loaf falls over shorts",
-    "cat refuses to move funny",
-    "cat sploots funny shorts",
-    # Sound moments
-    "cat yowling loudly funny short",
-    "cat makes weird noise short clip",
-    "cat chatters at window short",
-    "cat chirps at bird short clip",
-    "cat screams funny short",
-    # Expression / stare moments
-    "cat staring into void shorts",
-    "cat judges owner shorts funny",
-    "cat slow blink funny shorts",
-    "cat unimpressed face shorts",
-    "cat caught red handed funny short",
-    # Classic viral cat shorts
-    "viral cat moment 2024 shorts",
-    "viral cat moment 2025 shorts",
-    "funny cat shorts 2024",
-    "funny cat shorts 2025",
-    "cats being weird shorts compilation",
-]
+# ── Ranking-video strategy ────────────────────────────────────────────────────
+# ALL clips are sourced exclusively from proven viral cat ranking Shorts.
+# This guarantees every clip has already been validated as iconic/popular by
+# other creators and millions of viewers.
 
-# ── Primary: individual short viral cat clips ─────────────────────────────────
-# Every query explicitly contains "cat" so YouTube returns cat content.
-# Target: short individual videos (5–60s) where the whole clip = the moment.
-VIRAL_CAT_QUERIES = [
-    # YouTube Shorts cat clips (most reliable)
-    "funny cat shorts",
-    "cat being funny short",
-    "cat scared funny short",
-    "cat attack funny shorts",
-    "cat zoomies shorts",
-    "cat yelling funny shorts",
-    "kitten funny shorts",
-    "cats being weird shorts",
-    "cat reaction funny shorts",
-    "cat fails funny shorts",
-    # Classic viral cat moments
-    "funny cat video 2019",
-    "funny cat video 2020",
-    "viral cat video original",
-    "cat makes weird noise funny",
-    "cat knocking things off table",
-    "cat vs mirror funny",
-    "cat jumps scare funny",
-    "cat refuses to move funny",
-    "cat falls off counter funny",
-    "cat hissing funny",
-    "cat chirping funny",
-    "cat obsessed funny",
-    "cats going crazy funny",
-    "cat caught doing something funny",
-]
+# Only mine ranking videos above this view threshold.
+RANKING_MIN_VIEWS = 1_000_000   # 1 million — truly viral only
 
-# ── Secondary: TikTok cat compilations on YouTube ────────────────────────────
-# Well-curated collections of TikTok cat clips; chapters give exact boundaries.
-COMPILATION_QUERIES = [
-    "funny cat tiktok compilation 2024",
-    "funny cat tiktok compilation 2025",
-    "best cat tiktok clips compilation",
-    "cats tiktok funny compilation",
-    "viral cat tiktok moments compilation",
-    "funniest cat tiktok videos compilation",
-    "cat tiktok compilation no commentary",
-    "daily dose of internet cat videos",
-    "cat fails tiktok compilation",
-]
+# Clips taken from each ranking video: 3 from #1, 2 from #2 = 5 total.
+CLIPS_FROM_FIRST_RANKING  = 3
+CLIPS_FROM_SECOND_RANKING = 2
 
-# ── Phase 0: viral cat ranking videos as clip sources ─────────────────────────
-# Popular "Top 5 / Ranked" cat Shorts — we mine their descriptions and chapter
-# titles to find the actual source clips inside them.
+# Max ranking videos analysed to build the cross-reference popularity map.
+RANKING_ANALYSE_LIMIT = 10
+
+# Large, varied query set — we cast a wide net then filter by 1M+ views.
 RANKING_SOURCE_QUERIES = [
-    "top 10 funniest cat moments ranked shorts",
-    "best cat videos ranked funny",
+    "funniest cats ranked shorts",
+    "cats ranked funniest to least funny",
+    "ranking the funniest cat moments",
+    "top funniest cats ranked",
     "cat ranking countdown funny shorts",
-    "funniest cats ranked youtube shorts",
-    "top cat moments compilation ranked",
-    "cat ranking #1 funny shorts",
-    "cats ranked worst to best funny moments",
+    "ranking funny cat clips shorts",
+    "funniest cat shorts ranked",
+    "best cat moments ranked funny",
+    "top cat clips ranked funny shorts",
+    "ranking iconic cat moments shorts",
+    "cats ranked funny moments 2024",
+    "cats ranked funny moments 2025",
+    "viral cat moments ranked",
+    "cats ranked worst to funniest",
+    "funniest cat compilation ranked shorts",
+    "ranking the best cat videos",
+    "top 5 funniest cats shorts",
+    "rank every cat moment shorts",
+    "cat moments ranked funniest",
+    "ranking viral cat clips",
 ]
-
-# Minimum views a ranking video must have before we mine it.
-RANKING_MIN_VIEWS = 500_000
-
-# How many ranking videos to analyse per pipeline run.
-RANKING_ANALYSE_COUNT = 3
 
 # Regex: fish YouTube video IDs out of description text
 _YT_ID_RE = re.compile(
@@ -229,6 +159,25 @@ def _is_cat_video(title: str) -> bool:
         return False
     words = set(re.findall(r"\b[a-z]+\b", title.lower()))
     return bool(words & _CAT_WORDS)
+
+
+_EBU_RE = re.compile(r't:\s+([\d.]+)\s+M:\s+([-\d.]+)')
+
+
+def _is_english(title: str) -> bool:
+    """
+    Return True if the title is written in Latin/English script.
+    Rejects Cyrillic, CJK, Arabic, Devanagari, Thai, and other non-Latin scripts.
+    Emoji-only or number-only titles are allowed (they're universal).
+    """
+    if not title:
+        return True
+    alpha_chars = [c for c in title if c.isalpha()]
+    if not alpha_chars:
+        return True   # emoji / number-only → OK
+    # U+0000–U+024F covers Basic Latin through Latin Extended-B
+    latin = sum(1 for c in alpha_chars if ord(c) < 0x0250)
+    return (latin / len(alpha_chars)) >= 0.75
 
 
 class VideoScraper:
@@ -384,37 +333,6 @@ class VideoScraper:
 
     # ── Compilation-based clip extraction ─────────────────────────────────────
 
-    def _search_compilations(self, query: str, max_results: int = 6) -> list[dict]:
-        """Search for compilation/highlight videos (1–20 minutes long)."""
-        entries = self._ydl_extract_flat(
-            f"ytsearch{max_results}:{query}", playlist_end=max_results
-        )
-        results = []
-        for e in entries:
-            if not e:
-                continue
-            vid_id = e.get("id", "")
-            if not vid_id:
-                continue
-            title = e.get("title", "")
-            if not _is_cat_video(title):
-                logger.debug(f"Skipping non-cat compilation: {title!r}")
-                continue
-            if _is_unwanted(title):
-                continue
-            duration = e.get("duration") or 0
-            # Target: 1–20 minute compilation videos
-            if duration and not (60 <= duration <= 1200):
-                continue
-            results.append({
-                "id":         vid_id,
-                "url":        f"https://www.youtube.com/watch?v={vid_id}",
-                "title":      title,
-                "duration":   duration,
-                "view_count": e.get("view_count") or 0,
-            })
-        return sorted(results, key=lambda x: x["view_count"], reverse=True)
-
     def _clips_from_compilation(self, comp: dict) -> list[dict]:
         """
         Extract individual clip segments from a compilation video.
@@ -529,360 +447,217 @@ class VideoScraper:
 
         return clips
 
-    def _scrape_compilations(
-        self,
-        queries: list[str] | None = None,
-        want: int = 25,
-    ) -> list[dict]:
-        """Run compilation-based scraping across multiple queries."""
-        all_clips: list[dict] = []
-        q_list = queries or random.sample(
-            COMPILATION_QUERIES, min(5, len(COMPILATION_QUERIES))
-        )
-        for q in q_list:
-            if len(all_clips) >= want:
+    # ── Ranking-video mining ──────────────────────────────────────────────────
+
+    def _find_ranking_videos(self, min_views: int = RANKING_MIN_VIEWS) -> list[dict]:
+        """
+        Search extensively for cat ranking Shorts with at least min_views.
+
+        Casts a wide net across all RANKING_SOURCE_QUERIES, then filters
+        down to videos that meet the view-count bar.  If flat-extract doesn't
+        return a view count, we skip that entry (avoids slow full-info fetches
+        for every result).
+        """
+        seen: set[str] = set()
+        found: list[dict] = []
+
+        queries = random.sample(RANKING_SOURCE_QUERIES, min(12, len(RANKING_SOURCE_QUERIES)))
+        for q in queries:
+            if len(found) >= RANKING_ANALYSE_LIMIT * 3:
                 break
-            logger.info(f"Searching compilations: '{q[:50]}'")
-            try:
-                compilations = self._search_compilations(q, max_results=5)
-                logger.info(f"  Found {len(compilations)} compilations")
-                for comp in compilations[:3]:
-                    if len(all_clips) >= want:
-                        break
-                    clips = self._clips_from_compilation(comp)
-                    logger.info(
-                        f"  Extracted {len(clips)} clips from "
-                        f"'{comp['title'][:40]}'"
-                    )
-                    all_clips.extend(clips)
-            except Exception as e:
-                logger.warning(f"Compilation query failed '{q}': {e}")
-        return all_clips
-
-    def _scrape_individual_fallback(
-        self,
-        queries: list[str] | None = None,
-    ) -> list[dict]:
-        """
-        Search for individual short viral cat clips.
-
-        These are complete videos (5–60s) where the whole clip is the funny
-        moment — no slicing needed and no risk of grabbing two cats in one slot.
-
-        Comment-timestamp peak detection is deferred to post-processing on the
-        top 8 mid-length candidates only, to avoid 50+ sequential HTTP fetches
-        that would stall the pipeline for many minutes.
-        """
-        all_videos: list[dict] = []
-        q_list = queries or random.sample(VIRAL_CAT_QUERIES, min(8, len(VIRAL_CAT_QUERIES)))
-        for q in q_list:
+            logger.info(f"  Searching ranking sources: '{q[:55]}'")
             try:
                 entries = self._ydl_extract_flat(f"ytsearch20:{q}", playlist_end=20)
-                for e in entries:
-                    if not e:
-                        continue
-                    vid_id = e.get("id", "")
-                    if not vid_id or self._is_used(vid_id):
-                        continue
-                    duration = e.get("duration") or 0
-                    # Keep short individual clips only (whole video = the moment)
-                    if duration and duration > 60:
-                        continue
-                    title = e.get("title", "")
-                    # Hard reject: must be an actual cat video
-                    if not _is_cat_video(title):
-                        logger.debug(f"Rejected (not a cat): {title!r}")
-                        continue
-                    if _is_unwanted(title):
-                        continue
-                    all_videos.append({
-                        "id":         vid_id,
-                        "url":        f"https://www.youtube.com/watch?v={vid_id}",
-                        "title":      title,
-                        "start_time": None,
-                        "end_time":   None,
-                        "platform":   "youtube",
-                        "view_count": e.get("view_count") or 0,
-                        "like_count": e.get("like_count") or 0,
-                        "duration":   duration,
-                    })
-            except Exception as e:
-                logger.warning(f"Individual clip query failed '{q}': {e}")
-
-        # Sort by views so we post-process the best candidates first
-        all_videos.sort(key=lambda x: x["view_count"], reverse=True)
-
-        # Post-process: use comment timestamps for the top mid-length clips only.
-        # Limit to 8 fetches max to keep total extra latency under ~60s.
-        mid_length = [v for v in all_videos if v["duration"] and 20 <= v["duration"] <= 60]
-        logger.info(
-            f"  Comment-timestamp peak detection on top "
-            f"{min(8, len(mid_length))}/{len(mid_length)} mid-length clips…"
-        )
-        for clip_entry in mid_length[:8]:
-            duration = clip_entry["duration"]
-            ts_list = self._get_comment_timestamps(clip_entry["url"], duration)
-            if ts_list:
-                # Start 3s BEFORE the crowd-voted peak so the setup is visible
-                best_start = max(0.0, ts_list[0] - 3.0)
-                best_end = min(best_start + SEGMENT_TARGET_SECS, duration - 1)
-                if best_end > best_start + 4:
-                    clip_entry["start_time"] = best_start
-                    clip_entry["end_time"]   = best_end
-                    clip_entry["id"] = f"{clip_entry['id']}_{int(best_start)}"
-                    logger.info(
-                        f"  Peak moment {clip_entry['id']}: "
-                        f"{best_start:.1f}s–{best_end:.1f}s "
-                        f"({len(ts_list)} comment votes)"
-                    )
-
-        return all_videos
-
-    # ── Dedicated Shorts scraper (≤20s clips) ────────────────────────────────
-
-    def _scrape_cat_shorts(self, want: int = 25) -> list[dict]:
-        """
-        Find proper short-form funny cat clips — ideally ≤20 seconds.
-
-        These are the gold-standard inputs: the entire video is the funny
-        moment, no slicing needed.  YouTube Shorts sometimes report duration=0
-        in flat-extract, so we verify ambiguous entries with a full info fetch.
-        """
-        found: list[dict] = []
-        seen: set[str] = set()
-
-        queries = random.sample(SHORT_CAT_QUERIES, min(14, len(SHORT_CAT_QUERIES)))
-
-        for q in queries:
-            if len(found) >= want:
-                break
-            try:
-                entries = self._ydl_extract_flat(f"ytsearch25:{q}", playlist_end=25)
-                for e in entries:
-                    if not e:
-                        continue
-                    vid_id = e.get("id", "")
-                    if not vid_id or vid_id in seen or self._is_used(vid_id):
-                        continue
-                    title = e.get("title", "")
-                    if not _is_cat_video(title):
-                        continue
-                    if _is_unwanted(title):
-                        continue
-                    duration = e.get("duration") or 0
-                    # Hard reject anything confirmed longer than 20s
-                    if duration and duration > 20:
-                        continue
-                    seen.add(vid_id)
-                    # Unknown duration (many Shorts report 0) — verify with full fetch
-                    view_count = e.get("view_count") or 0
-                    like_count = e.get("like_count") or 0
-                    if not duration:
-                        info = self._ydl_get_info(
-                            f"https://www.youtube.com/watch?v={vid_id}"
-                        )
-                        if not info:
-                            continue
-                        duration = info.get("duration") or 0
-                        if duration > 20:
-                            continue
-                        title = info.get("title") or title
-                        if not _is_cat_video(title):
-                            continue
-                        # Prefer the richer view/like counts from the full fetch
-                        view_count = info.get("view_count") or view_count
-                        like_count = info.get("like_count") or like_count
-
-                    found.append({
-                        "id":         vid_id,
-                        "url":        f"https://www.youtube.com/watch?v={vid_id}",
-                        "title":      title,
-                        "start_time": None,
-                        "end_time":   None,
-                        "platform":   "youtube",
-                        "view_count": view_count,
-                        "like_count": like_count,
-                        "duration":   duration,
-                        "_shorts":    True,
-                    })
             except Exception as ex:
-                logger.warning(f"Cat Shorts query failed '{q}': {ex}")
-
-        found.sort(key=lambda x: x.get("view_count", 0), reverse=True)
-        logger.info(f"Cat Shorts scraper: {len(found)} clips ≤20s found")
-        return found
-
-    # ── Phase 0: mine viral ranking videos for source clips ──────────────────
-
-    def _scrape_viral_ranking_sources(self, want: int = 20) -> list[dict]:
-        """
-        Phase 0 — High-priority candidates from popular cat ranking Shorts.
-
-        Algorithm:
-          1. Search for cat ranking videos with 500k+ views.
-          2. Analyse at least RANKING_ANALYSE_COUNT of them.
-          3. Extract source video IDs from their descriptions.
-          4. For each source video:
-             - If short (≤60s): use as an individual clip directly.
-             - If longer: extract segments via chapters / comment timestamps.
-          5. Build search queries from chapter titles and run them too.
-        """
-        phase0: list[dict] = []
-        seen_ids: set[str] = set()
-        ranking_vids: list[dict] = []
-
-        # Step 1: find popular ranking videos
-        queries = random.sample(RANKING_SOURCE_QUERIES, min(4, len(RANKING_SOURCE_QUERIES)))
-        for q in queries:
-            if len(ranking_vids) >= RANKING_ANALYSE_COUNT * 4:
-                break
-            logger.info(f"Phase 0: searching ranking sources '{q[:55]}'")
-            entries = self._ydl_extract_flat(f"ytsearch12:{q}", playlist_end=12)
+                logger.debug(f"Ranking search failed '{q}': {ex}")
+                continue
             for e in entries:
                 if not e:
                     continue
                 vid_id = e.get("id", "")
-                if not vid_id or vid_id in seen_ids:
-                    continue
-                views = e.get("view_count") or 0
-                if views < RANKING_MIN_VIEWS:
+                if not vid_id or vid_id in seen:
                     continue
                 title = e.get("title", "")
-                if not _is_cat_video(title):
+                if not _is_cat_video(title) or not _is_english(title):
                     continue
-                seen_ids.add(vid_id)
-                ranking_vids.append({
+                views = e.get("view_count") or 0
+                if views < min_views:
+                    continue
+                seen.add(vid_id)
+                found.append({
                     "id":         vid_id,
                     "url":        f"https://www.youtube.com/watch?v={vid_id}",
                     "title":      title,
                     "view_count": views,
                 })
 
-        ranking_vids.sort(key=lambda x: x["view_count"], reverse=True)
-        to_analyse = ranking_vids[:RANKING_ANALYSE_COUNT]
+        found.sort(key=lambda x: x["view_count"], reverse=True)
         logger.info(
-            f"Phase 0: {len(ranking_vids)} ranking videos ≥{RANKING_MIN_VIEWS:,} views; "
-            f"analysing top {len(to_analyse)}"
+            f"  Found {len(found)} ranking videos with ≥{min_views:,} views"
         )
+        return found
 
-        chapter_queries: list[str] = []
+    def _analyze_ranking_video(
+        self, rv: dict, seen_ids: set[str]
+    ) -> list[dict]:
+        """
+        "Watch" a ranking video — parse its description and chapters to
+        extract the EXACT source clips it used.
 
-        for rv in to_analyse:
-            logger.info(
-                f"  Analysing: '{rv['title'][:60]}' ({rv['view_count']:,} views)"
-            )
-            info = self._ydl_get_info(rv["url"])
-            if not info:
+        Priority order:
+          1. Description links  → directly fetch each source clip's info
+          2. Chapters (no links)→ extract segments from the ranking video itself
+          3. Chapter titles      → search YouTube to find the matching source clip
+
+        Returns a list of clip dicts, each tagged with _ranking_vid_id and
+        _ranking_views so we can cross-reference across multiple ranking videos.
+        """
+        logger.info(
+            f"  Analysing: '{rv['title'][:60]}' ({rv['view_count']:,} views)"
+        )
+        info = self._ydl_get_info(rv["url"])
+        if not info:
+            return []
+
+        rv_id     = rv["id"]
+        rv_views  = rv["view_count"]
+        desc      = info.get("description") or ""
+        chapters  = info.get("chapters") or []
+        clips: list[dict] = []
+
+        # ── Route 1: description contains source YouTube links ────────────────
+        src_ids = [
+            sid for sid in _YT_ID_RE.findall(desc)
+            if sid != rv_id and sid not in seen_ids and not self._is_used(sid)
+        ]
+        logger.info(f"    {len(src_ids)} source ID(s) found in description")
+
+        for src_id in src_ids:
+            seen_ids.add(src_id)
+            src_url  = f"https://www.youtube.com/watch?v={src_id}"
+            src_info = self._ydl_get_info(src_url)
+            if not src_info:
                 continue
+            src_title = src_info.get("title") or ""
+            if not _is_cat_video(src_title) or _is_unwanted(src_title) or not _is_english(src_title):
+                continue
+            duration = src_info.get("duration") or 0
+            views    = src_info.get("view_count") or 0
 
-            # Step 3: extract source clip IDs from description
-            description = info.get("description") or ""
-            found_ids = _YT_ID_RE.findall(description)
-            logger.info(f"  {len(found_ids)} source ID(s) in description")
-            for src_id in found_ids:
-                if self._is_used(src_id) or src_id in seen_ids or src_id == rv["id"]:
-                    continue
-                seen_ids.add(src_id)
-                src_url = f"https://www.youtube.com/watch?v={src_id}"
-                src_info = self._ydl_get_info(src_url)
-                if not src_info:
-                    continue
-                duration = src_info.get("duration") or 0
-                src_title = src_info.get("title") or ""
-                if not _is_cat_video(src_title):
-                    continue
-                if duration and duration > 60:
-                    # Longer video — extract clips from it
-                    clips = self._clips_from_compilation({
-                        "id":         src_id,
-                        "url":        src_url,
-                        "title":      src_title,
-                        "duration":   duration,
-                        "view_count": src_info.get("view_count") or 0,
-                    })
-                    for c in clips:
-                        c["_phase0"] = True
-                    phase0.extend(clips)
-                    logger.info(
-                        f"  Source {src_id}: extracted {len(clips)} segments "
-                        f"from {duration:.0f}s video"
-                    )
-                else:
-                    # Short individual clip — use as-is
-                    phase0.append({
-                        "id":         src_id,
-                        "url":        src_url,
-                        "title":      src_title,
-                        "start_time": None,
-                        "end_time":   None,
-                        "platform":   "youtube",
-                        "view_count": src_info.get("view_count") or 0,
-                        "like_count": src_info.get("like_count") or 0,
-                        "duration":   duration,
-                        "_phase0":    True,
-                    })
+            if duration and duration > 60:
+                # Long source — slice best segments out of it
+                segs = self._clips_from_compilation({
+                    "id": src_id, "url": src_url, "title": src_title,
+                    "duration": duration, "view_count": views,
+                })
+                for s in segs:
+                    s["_ranking_vid_id"]  = rv_id
+                    s["_ranking_views"]   = rv_views
+                clips.extend(segs)
+                logger.info(
+                    f"    Source {src_id}: {len(segs)} segments from {duration:.0f}s"
+                )
+            else:
+                clips.append({
+                    "id":               src_id,
+                    "url":              src_url,
+                    "title":            src_title,
+                    "start_time":       None,
+                    "end_time":         None,
+                    "platform":         "youtube",
+                    "view_count":       views,
+                    "like_count":       src_info.get("like_count") or 0,
+                    "duration":         duration,
+                    "_ranking_vid_id":  rv_id,
+                    "_ranking_views":   rv_views,
+                })
 
-            # Step 4: collect chapter titles → search queries
-            chapters = info.get("chapters") or []
+        # ── Route 2: chapters present but no description links ────────────────
+        if not clips and chapters:
+            logger.info(f"    No description links — extracting {len(chapters)} chapters")
+            # Treat the ranking video itself as a source and slice by chapters
+            rv_duration = info.get("duration") or 0
             for ch in chapters:
-                ch_title = (ch.get("title") or "").strip()
-                # Strip ranking prefixes like "#5 —" or "5."
-                cleaned = re.sub(r'^#?\d+[\.\-:\s]+', '', ch_title).strip()
+                start    = float(ch.get("start_time", 0))
+                end      = float(ch.get("end_time", start + SEGMENT_TARGET_SECS))
+                if rv_duration and start >= rv_duration:
+                    continue
+                seg_len  = end - start
+                if seg_len < 3 or seg_len > 45:
+                    continue
+                clip_id  = f"{rv_id}_{int(start)}"
+                if self._is_used(clip_id) or clip_id in seen_ids:
+                    continue
+                seen_ids.add(clip_id)
+                label = re.sub(r'^#?\d+[\.\-:\s]+', '', ch.get("title") or "").strip()
+                clips.append({
+                    "id":               clip_id,
+                    "url":              rv["url"],
+                    "title":            label or rv["title"][:30],
+                    "start_time":       start,
+                    "end_time":         min(end, start + SEGMENT_TARGET_SECS),
+                    "platform":         "youtube",
+                    "view_count":       rv_views,
+                    "like_count":       0,
+                    "duration":         seg_len,
+                    "_ranking_vid_id":  rv_id,
+                    "_ranking_views":   rv_views,
+                })
+
+        # ── Route 3: search chapter titles to find the original source clips ──
+        if not clips:
+            ch_queries = []
+            for ch in chapters:
+                raw = (ch.get("title") or "").strip()
+                cleaned = re.sub(r'^#?\d+[\.\-:\s]+', '', raw).strip()
                 if len(cleaned) >= 4:
-                    chapter_queries.append(f"{cleaned} cat funny")
+                    ch_queries.append(f"{cleaned} cat funny original")
 
-        # Step 4 continued: search for clips matching chapter titles
-        # Prefer ≤20s Shorts; fall back to accepting up to 60s with peak detection.
-        logger.info(f"Phase 0: searching {len(chapter_queries)} chapter-title queries")
-        for cq in chapter_queries[:14]:
-            if len(phase0) >= want:
-                break
-            try:
-                entries = self._ydl_extract_flat(f"ytsearch8:{cq}", playlist_end=8)
-                for e in entries:
-                    if not e:
-                        continue
-                    vid_id = e.get("id", "")
-                    if not vid_id or vid_id in seen_ids or self._is_used(vid_id):
-                        continue
-                    duration = e.get("duration") or 0
-                    # Skip anything confirmed longer than 60s
-                    if duration and duration > 60:
-                        continue
-                    title = e.get("title", "")
-                    if not _is_cat_video(title):
-                        continue
-                    seen_ids.add(vid_id)
-                    is_short = not duration or duration <= 20
-                    clip: dict = {
-                        "id":         vid_id,
-                        "url":        f"https://www.youtube.com/watch?v={vid_id}",
-                        "title":      title,
-                        "start_time": None,
-                        "end_time":   None,
-                        "platform":   "youtube",
-                        "view_count": e.get("view_count") or 0,
-                        "like_count": e.get("like_count") or 0,
-                        "duration":   duration,
-                        "_phase0":    True,
-                        "_shorts":    is_short,
-                    }
-                    # For 20–60s clips, pin the peak funny moment via comments
-                    if duration and 20 < duration <= 60:
-                        ts_list = self._get_comment_timestamps(clip["url"], duration)
-                        if ts_list:
-                            bs = max(0.0, ts_list[0] - 3.0)   # 3s before peak
-                            be = min(bs + SEGMENT_TARGET_SECS, duration - 1)
-                            if be > bs + 4:
-                                clip["start_time"] = bs
-                                clip["end_time"]   = be
-                                clip["id"] = f"{vid_id}_{int(bs)}"
-                    phase0.append(clip)
-            except Exception as ex:
-                logger.debug(f"Phase 0 chapter query failed '{cq}': {ex}")
+            if not ch_queries:
+                # Fallback: use the ranking video title words as a search
+                words = rv["title"].lower().split()
+                nouns = [w for w in words if len(w) > 3 and w not in {
+                    "funniest","ranked","ranking","cats","moments","shorts","funny"
+                }]
+                if nouns:
+                    ch_queries = [f"{' '.join(nouns[:3])} cat funny"]
 
-        logger.info(f"Phase 0: {len(phase0)} high-priority candidates collected")
-        return phase0
+            logger.info(f"    Searching {len(ch_queries)} chapter-title queries")
+            for cq in ch_queries[:8]:
+                try:
+                    entries = self._ydl_extract_flat(f"ytsearch6:{cq}", playlist_end=6)
+                    for e in entries:
+                        if not e:
+                            continue
+                        vid_id = e.get("id", "")
+                        if not vid_id or vid_id in seen_ids or self._is_used(vid_id):
+                            continue
+                        title = e.get("title", "")
+                        if not _is_cat_video(title) or _is_unwanted(title) or not _is_english(title):
+                            continue
+                        duration = e.get("duration") or 0
+                        if duration and duration > 60:
+                            continue
+                        seen_ids.add(vid_id)
+                        clips.append({
+                            "id":               vid_id,
+                            "url":              f"https://www.youtube.com/watch?v={vid_id}",
+                            "title":            title,
+                            "start_time":       None,
+                            "end_time":         None,
+                            "platform":         "youtube",
+                            "view_count":       e.get("view_count") or 0,
+                            "like_count":       e.get("like_count") or 0,
+                            "duration":         duration,
+                            "_ranking_vid_id":  rv_id,
+                            "_ranking_views":   rv_views,
+                        })
+                        break  # one result per chapter query
+                except Exception as ex:
+                    logger.debug(f"Chapter-title search failed '{cq}': {ex}")
+
+        logger.info(f"    → {len(clips)} source clips extracted")
+        return clips
 
     def _get_reusable_candidates(self) -> list[dict]:
         """Phase 3: previously-used clips that are under the reuse limit."""
@@ -912,101 +687,130 @@ class VideoScraper:
         tt_hashtags: list[str] | None = None,
     ) -> list[dict]:
         """
-        Return a pool of clip candidates.
+        Return exactly `want` clip candidates sourced from proven viral
+        cat ranking Shorts (1M+ views).
 
-        Primary strategy: extract segments from popular compilation videos.
-        If yt_queries are provided (from the theme), they're used to guide the
-        compilation search so clips match the chosen title theme.
+        Strategy:
+          1. Find ranking videos with 1M+ views (fallback to 500K / 100K).
+          2. Analyse up to RANKING_ANALYSE_LIMIT of them; build a cross-reference
+             map so clips used by multiple rankings are ranked highest.
+          3. Take CLIPS_FROM_FIRST_RANKING from the #1 ranking video and
+             CLIPS_FROM_SECOND_RANKING from the #2 ranking video.
+          4. Fill any remaining slots from cross-referenced clips, then
+             reusable clips, then (last resort) lower-view-count rankings.
         """
         def _dedup(videos: list[dict]) -> list[dict]:
             seen: set[str] = set()
             out: list[dict] = []
             for v in videos:
-                if v["id"] and v["id"] not in seen:
+                if v.get("id") and v["id"] not in seen:
                     seen.add(v["id"])
                     out.append(v)
             return out
 
-        # Phase 0a: dedicated Shorts scraper (≤20s) — highest priority
-        # These are the best possible inputs: entire clip IS the funny moment.
-        logger.info("Phase 0a: Scraping dedicated funny cat Shorts (≤20s)…")
-        shorts_clips = _dedup(self._scrape_cat_shorts(want=want))
-        shorts_fresh = [v for v in shorts_clips if self._use_count(v["id"]) == 0]
-        logger.info(f"Phase 0a: {len(shorts_fresh)} fresh cat Shorts found")
+        seen_ids: set[str] = set()
 
-        # Phase 0b: mine viral ranking videos (500k+ views) for source clips
-        logger.info("Phase 0b: Mining viral cat ranking videos for source clips…")
-        phase0_clips = _dedup(self._scrape_viral_ranking_sources(want=want))
-        phase0_fresh = [v for v in phase0_clips if self._use_count(v["id"]) == 0]
-        logger.info(f"Phase 0b: {len(phase0_fresh)} high-priority fresh clips")
+        # ── Find ranking videos ───────────────────────────────────────────────
+        logger.info("Searching for cat ranking Shorts with 1M+ views…")
+        ranking_vids = self._find_ranking_videos(min_views=1_000_000)
 
-        # Phase 1: Individual short viral clips (up to 60s with peak detection)
-        # Use theme queries + the broad VIRAL_CAT_QUERIES pool.
-        ind_queries = list(yt_queries or []) + random.sample(
-            VIRAL_CAT_QUERIES, min(8, len(VIRAL_CAT_QUERIES))
-        )
-        logger.info("Phase 1: Searching for individual viral cat clips…")
-        ind = _dedup(self._scrape_individual_fallback(queries=ind_queries))
-        fresh = [v for v in ind if self._use_count(v["id"]) == 0]
-        logger.info(f"Phase 1: {len(fresh)} fresh individual clips found")
+        if len(ranking_vids) < 2:
+            logger.info("Not enough 1M+ rankings — widening to 500K+…")
+            ranking_vids = self._find_ranking_videos(min_views=500_000)
+        if len(ranking_vids) < 2:
+            logger.info("Still short — widening to 100K+…")
+            ranking_vids = self._find_ranking_videos(min_views=100_000)
 
-        # Merge: Shorts first, then Phase 0b, then Phase 1
-        combined_p01 = _dedup(shorts_fresh + phase0_fresh + fresh)
-
-        # Phase 2: Compilation extraction fallback
-        if len(combined_p01) < want:
-            need = want - len(combined_p01)
-            logger.info(f"Phase 2: Need {need} more — extracting from compilations…")
-            comp_queries = None
-            if yt_queries:
-                comp_queries = [f"{q} compilation" for q in yt_queries[:3]]
-            raw = self._scrape_compilations(queries=comp_queries, want=need)
-            fresh_comp = [v for v in _dedup(raw) if self._use_count(v["id"]) == 0]
-            logger.info(f"Phase 2: {len(fresh_comp)} fresh compilation clips")
-            all_fresh = _dedup(combined_p01 + fresh_comp)
-        else:
-            all_fresh = combined_p01
-
-        # Phase 3: Reusable clips
-        if len(all_fresh) < want:
-            reusable = self._get_reusable_candidates()
-            used_ids = {v["id"] for v in all_fresh}
-            reusable = [v for v in reusable if v["id"] not in used_ids]
-            logger.info(f"Phase 3: {len(reusable)} reusable clips available")
-            combined = all_fresh + reusable
-        else:
-            combined = all_fresh
-
-        if not combined:
-            logger.warning("No candidates found across all phases")
+        if not ranking_vids:
+            logger.warning("Could not find any cat ranking videos — returning empty")
             return []
 
-        # Priority: ≤20s Shorts → Phase 0b ranking sources → regular fresh → reuse
-        # Within each tier, sort by view count descending.
-        def _tier(v: dict) -> int:
-            if v.get("_reuse"):
-                return 3
-            dur = v.get("duration") or 0
-            if v.get("_shorts") or (dur and dur <= 20):
-                return 0   # true Shorts — highest priority
-            if v.get("_phase0"):
-                return 1   # ranking-sourced clips
-            return 2       # general individual / compilation clips
+        # ── Analyse ranking videos; build popularity cross-reference map ─────
+        logger.info(
+            f"Analysing top {min(RANKING_ANALYSE_LIMIT, len(ranking_vids))} "
+            f"ranking videos…"
+        )
+        # Map: source_clip_id → {clip_data, cross_count}
+        cross_map: dict[str, dict] = {}
+        # List of (ranking_vid, [source_clips]) in view-count order
+        analysed: list[tuple[dict, list[dict]]] = []
 
-        combined.sort(key=lambda v: (_tier(v), -v.get("view_count", 0)))
+        for rv in ranking_vids[:RANKING_ANALYSE_LIMIT]:
+            seen_ids.add(rv["id"])
+            clips = self._analyze_ranking_video(rv, seen_ids)
+            fresh = [c for c in clips if self._use_count(c["id"]) == 0]
+            if fresh:
+                analysed.append((rv, fresh))
+            for c in fresh:
+                sid = c["id"]
+                if sid in cross_map:
+                    cross_map[sid]["_cross_count"] += 1
+                else:
+                    cross_map[sid] = {**c, "_cross_count": 1}
 
-        target = max(want * 3, 20)
-        pool = combined[:target]
+        if not analysed:
+            logger.warning("No source clips found in any ranking video")
+            reusable = self._get_reusable_candidates()
+            return reusable[:want]
 
-        # Shuffle WITHIN each tier so the same clips don't always appear first,
-        # but preserve the inter-tier priority ordering (Tier 0 before Tier 1, etc.)
-        from itertools import groupby
-        shuffled: list[dict] = []
-        for _, group in groupby(pool, key=_tier):
-            tier_clips = list(group)
-            random.shuffle(tier_clips)
-            shuffled.extend(tier_clips)
-        pool = shuffled
+        # ── Pick clips: 3 from #1 ranking video, 2 from #2 ───────────────────
+        def _rank_key(c: dict) -> tuple:
+            return (
+                -cross_map.get(c["id"], {}).get("_cross_count", 0),
+                -c.get("view_count", 0),
+            )
 
-        logger.info(f"Returning {len(pool)} candidates total")
-        return pool
+        selected: list[dict] = []
+
+        if len(analysed) >= 1:
+            rv1, clips1 = analysed[0]
+            clips1_sorted = sorted(clips1, key=_rank_key)
+            take = clips1_sorted[:CLIPS_FROM_FIRST_RANKING]
+            selected.extend(take)
+            logger.info(
+                f"  Ranking #1 '{rv1['title'][:50]}' "
+                f"({rv1['view_count']:,} views) → {len(take)} clips"
+            )
+
+        if len(analysed) >= 2:
+            rv2, clips2 = analysed[1]
+            used = {c["id"] for c in selected}
+            clips2_sorted = sorted(
+                [c for c in clips2 if c["id"] not in used], key=_rank_key
+            )
+            take = clips2_sorted[:CLIPS_FROM_SECOND_RANKING]
+            selected.extend(take)
+            logger.info(
+                f"  Ranking #2 '{rv2['title'][:50]}' "
+                f"({rv2['view_count']:,} views) → {len(take)} clips"
+            )
+
+        # ── Fill remaining slots from cross-referenced pool ───────────────────
+        if len(selected) < want:
+            used = {c["id"] for c in selected}
+            # All cross-referenced clips, sorted by how many rankings used them
+            xref_pool = sorted(
+                [c for c in cross_map.values() if c["id"] not in used],
+                key=lambda c: (-c.get("_cross_count", 0), -c.get("view_count", 0)),
+            )
+            for c in xref_pool:
+                if len(selected) >= want:
+                    break
+                selected.append(c)
+            logger.info(
+                f"  Cross-reference fill: now have {len(selected)}/{want} clips"
+            )
+
+        # ── Last resort: reusable clips ───────────────────────────────────────
+        if len(selected) < want:
+            used = {c["id"] for c in selected}
+            reusable = [
+                c for c in self._get_reusable_candidates()
+                if c["id"] not in used
+            ]
+            selected.extend(reusable[: want - len(selected)])
+            logger.info(f"  Reuse fill: now have {len(selected)}/{want} clips")
+
+        result = _dedup(selected)
+        logger.info(f"Returning {len(result)} candidates from viral ranking sources")
+        return result
