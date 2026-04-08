@@ -214,6 +214,9 @@ class YouTubeUploader:
                     pct = int(status.progress() * 100)
                     logger.info(f"  Upload progress: {pct}%")
 
+            if not response:
+                logger.error("Upload loop exited but response is empty")
+                return None
             video_id = response.get("id", "")
             logger.info(f"  ✓ Uploaded! https://www.youtube.com/shorts/{video_id}")
             return video_id

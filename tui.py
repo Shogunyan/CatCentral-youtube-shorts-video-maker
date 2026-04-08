@@ -73,10 +73,13 @@ def _next_upload_str(upload_times: list[str]) -> str:
     if not valid:
         return "Upload times invalid — check Settings"
     for t in sorted(valid):
-        h, m = int(t.split(":")[0]), int(t.split(":")[1])
-        scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
-        if scheduled > now:
-            return f"Next upload: {t}"
+        try:
+            h, m = int(t.split(":")[0]), int(t.split(":")[1])
+            scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
+            if scheduled > now:
+                return f"Next upload: {t}"
+        except (ValueError, IndexError):
+            continue   # e.g. hour=25 or minute=65 — out-of-range values
     first = sorted(valid)[0]
     return f"Next upload: {first}  (tomorrow)"
 
