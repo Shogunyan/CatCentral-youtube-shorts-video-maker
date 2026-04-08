@@ -224,8 +224,33 @@ class SetupScreen(Screen):
 
         _auth_done = threading.Event()
 
+        def _copy_to_clipboard(text: str) -> bool:
+            """Try to copy text to the system clipboard. Returns True on success."""
+            import platform
+            import subprocess as _sp
+            try:
+                sys_name = platform.system()
+                if sys_name == "Darwin":
+                    _sp.run(["pbcopy"], input=text.encode(), check=True)
+                    return True
+                # Linux / WSL — try wl-copy, xclip, xsel in order
+                for cmd in (
+                    ["wl-copy"],
+                    ["xclip", "-selection", "clipboard"],
+                    ["xsel", "--clipboard", "--input"],
+                ):
+                    try:
+                        _sp.run(cmd, input=text.encode(),
+                                check=True, capture_output=True)
+                        return True
+                    except (FileNotFoundError, Exception):
+                        continue
+            except Exception:
+                pass
+            return False
+
         def _url_watcher() -> None:
-            """Poll for the auth URL and post it to the status widget."""
+            """Poll for the auth URL, copy it to clipboard, and show it in status."""
             import os
             for _ in range(60):          # max ~30s of polling
                 if _auth_done.is_set():
@@ -236,9 +261,11 @@ class SetupScreen(Screen):
                         with open(_URL_FILE) as f:
                             url = f.read().strip()
                         if url:
+                            copied = _copy_to_clipboard(url)
+                            clip_note = "  (copied to clipboard!)" if copied else ""
                             self.app.call_from_thread(
                                 self._set_status,
-                                f"🌐  Browser didn't open? Copy this URL:\n{url}",
+                                f"🌐  Browser didn't open? Paste this URL in your browser{clip_note}:\n{url}",
                             )
                             return
                 except Exception:
