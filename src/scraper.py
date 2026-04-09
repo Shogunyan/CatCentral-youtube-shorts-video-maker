@@ -861,11 +861,14 @@ class VideoScraper:
                 })
 
         # ── Route 2: chapters present but no description links ────────────────
-        if not clips and chapters:
-            logger.info(f"    No description links — extracting {len(chapters)} chapters")
-            # Treat the ranking video itself as a source and slice by chapters.
-            # Enforce a minimum gap so adjacent clips from the same video can't
-            # overlap or show the same cat moment due to keyframe alignment.
+        # Skip entirely when Gemini is available — Route 3a handles this better
+        # by searching for ORIGINAL standalone videos for each clip.
+        _has_gemini = bool(os.getenv("GEMINI_API_KEY", ""))
+        if not clips and chapters and not _has_gemini:
+            logger.info(
+                f"    No description links — searching originals for "
+                f"{len(chapters)} chapters (no Gemini key)"
+            )
             rv_duration = info.get("duration") or 0
             last_end: float = -999.0
             for ch in chapters:
@@ -879,25 +882,92 @@ class VideoScraper:
                 # Require at least 15s gap from previous accepted clip
                 if start < last_end + 15:
                     continue
-                clip_id  = f"{rv_id}_{int(start)}"
-                if self._is_used(clip_id) or clip_id in seen_ids:
-                    continue
-                seen_ids.add(clip_id)
                 last_end = end
-                label = re.sub(r'^#?\d+[\.\-:\s]+', '', ch.get("title") or "").strip()
-                clips.append({
-                    "id":               clip_id,
-                    "url":              rv["url"],
-                    "title":            label or rv["title"][:30],
-                    "start_time":       start,
-                    "end_time":         min(end, start + SEGMENT_TARGET_SECS),
-                    "platform":         "ranking_slice",
-                    "view_count":       rv_views,
-                    "like_count":       0,
-                    "duration":         seg_len,
-                    "_ranking_vid_id":  rv_id,
-                    "_ranking_views":   rv_views,
-                })
+
+                raw_label = re.sub(
+                    r'^#?\d+[\.\-:\s]+', '', ch.get("title") or ""
+                ).strip()
+
+                # Step 1: Search for original standalone video using chapter title
+                found_original = False
+                if raw_label:
+                    for cq in [
+                        f"{raw_label} cat original",
+                        f"{raw_label} funny cat",
+                        raw_label,
+                    ]:
+                        if found_original:
+                            break
+                        try:
+                            entries = self._ydl_extract_flat(
+                                f"ytsearch5:{cq}", playlist_end=5
+                            )
+                            for e in entries:
+                                if not e:
+                                    continue
+                                vid_id = e.get("id", "")
+                                if (not vid_id or vid_id in seen_ids
+                                        or self._is_used(vid_id)):
+                                    continue
+                                title = e.get("title", "")
+                                if (not _is_cat_video(title)
+                                        or _is_unwanted(title)
+                                        or not _is_english(title)):
+                                    continue
+                                dur = e.get("duration") or 0
+                                if dur and dur > 90:
+                                    continue
+                                views = e.get("view_count") or 0
+                                if views > 0 and views < 100_000:
+                                    continue
+                                seen_ids.add(vid_id)
+                                clips.append({
+                                    "id":              vid_id,
+                                    "url":             f"https://www.youtube.com/watch?v={vid_id}",
+                                    "title":           title,
+                                    "start_time":      None,
+                                    "end_time":        None,
+                                    "platform":        "youtube",
+                                    "view_count":      views,
+                                    "like_count":      e.get("like_count") or 0,
+                                    "duration":        dur,
+                                    "_ranking_vid_id": rv_id,
+                                    "_ranking_views":  rv_views,
+                                })
+                                found_original = True
+                                logger.debug(
+                                    f"      Route2 chapter '{raw_label}'"
+                                    f" → original found: {vid_id}"
+                                )
+                                break
+                        except Exception as ex:
+                            logger.debug(
+                                f"Route 2 original search failed '{cq}': {ex}"
+                            )
+
+                # Step 2: Fall back to ranking slice if no original found
+                if not found_original:
+                    clip_id = f"{rv_id}_{int(start)}"
+                    if self._is_used(clip_id) or clip_id in seen_ids:
+                        continue
+                    seen_ids.add(clip_id)
+                    clips.append({
+                        "id":               clip_id,
+                        "url":              rv["url"],
+                        "title":            raw_label or rv["title"][:30],
+                        "start_time":       start,
+                        "end_time":         min(end, start + SEGMENT_TARGET_SECS),
+                        "platform":         "ranking_slice",
+                        "view_count":       rv_views,
+                        "like_count":       0,
+                        "duration":         seg_len,
+                        "_ranking_vid_id":  rv_id,
+                        "_ranking_views":   rv_views,
+                    })
+                    logger.debug(
+                        f"      Route2 chapter '{raw_label}'"
+                        f" → ranking slice fallback @{start:.0f}s"
+                    )
 
         # ── Route 3: Gemini Vision analysis + targeted search for originals ────
         if not clips:
