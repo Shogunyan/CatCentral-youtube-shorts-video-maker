@@ -141,7 +141,8 @@ class Pipeline:
         used_metas = [m for m, _ in downloaded]
 
         # ── 3. Pass raw titles — video_editor._make_short_label formats them ──
-        clip_labels = [m.get("title", "") for m, _ in downloaded]
+        clip_labels   = [m.get("title", "") for m, _ in downloaded]
+        viral_scores  = [m.get("_viral_score", 0) for m, _ in downloaded]
         self._report(46, "✏  Caption ready", f"Title: {title}")
 
         # ── 4. Build video ────────────────────────────────────────────────────
@@ -170,6 +171,7 @@ class Pipeline:
                     clip_platforms=clip_platforms,
                     on_progress=on_video_step,
                     clip_labels=clip_labels,
+                    viral_scores=viral_scores,
                 )
             else:
                 logger.info(f"[DRY RUN] Would write video to {output_path}")

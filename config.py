@@ -47,6 +47,7 @@ class Config:
         self.download_dir: Path = self.data_dir / "downloaded"
         self.processed_dir: Path = self.data_dir / "processed"
         self.used_videos_path: Path = self.data_dir / "used_videos.json"
+        self.viral_clips_path: Path = self.data_dir / "viral_clips.json"
         self.token_path: Path = self.data_dir / "youtube_token.json"
         self.log_path: Path = self.base_dir / "logs" / "app.log"
 

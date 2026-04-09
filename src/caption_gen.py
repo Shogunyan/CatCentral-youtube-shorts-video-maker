@@ -11,89 +11,109 @@ import random
 # The scraper uses these to find clips that match the title.
 
 THEMES = [
+    # ── Titles mirroring the exact formula used by 1M+ view cat ranking Shorts ──
+    # Pattern: short + emoji + clear subject + number or ranking hook
     {
-        "title": "Funniest Cats",
-        "yt_queries": ["funny cat video", "hilarious cat moment", "funny cat caught on camera"],
-        "tt_hashtags": ["funnycat", "funnycats", "funnyanimals"],
+        "title": "Top 5 Funniest Cats 😂",
+        "yt_queries": ["funny cat video viral", "hilarious cat moment caught on camera", "funniest cat clip original"],
+        "tt_hashtags": ["funnycat", "top5cats", "funnycats"],
     },
     {
-        "title": "Silliest Cats Ever",
-        "yt_queries": ["silly cat video", "goofy cat moment", "cats being silly"],
-        "tt_hashtags": ["sillycat", "goofycat", "catsbeingcats"],
+        "title": "Cats Ranked 5 to 1 🏆",
+        "yt_queries": ["funny cat ranked viral", "best cat moment original", "cat clip most viewed"],
+        "tt_hashtags": ["catranking", "catsranked", "funnycats"],
     },
     {
-        "title": "Hilarious Cat Moments",
-        "yt_queries": ["hilarious cat moment", "funny cat clip", "cat being hilarious"],
-        "tt_hashtags": ["funnycat", "catmoment", "hilariouscat"],
+        "title": "Most Viral Cat Moments 🔥",
+        "yt_queries": ["most viral cat video", "cat video gone viral million views", "viral cat moment original"],
+        "tt_hashtags": ["viralcat", "catmoments", "funnycats"],
     },
     {
-        "title": "Cats Being Cats",
-        "yt_queries": ["cats being cats funny", "cat doing cat things", "cats being weird funny"],
-        "tt_hashtags": ["catsbeingcats", "catlife", "funnycats"],
+        "title": "5 Cats That Broke The Internet 😱",
+        "yt_queries": ["cat video broke internet viral", "most viewed cat clip original", "viral cat funny moment"],
+        "tt_hashtags": ["viralcat", "catinternet", "funnycats"],
     },
     {
-        "title": "Viral Cat Videos",
-        "yt_queries": ["viral cat video", "most viral cat moment", "cat video gone viral"],
-        "tt_hashtags": ["viralcat", "catsoftiktok", "catvideos"],
+        "title": "Funniest Cat Clips Ranked 🐱",
+        "yt_queries": ["funniest cat clip original", "funny cat moment caught on camera", "hilarious cat video viral"],
+        "tt_hashtags": ["funnycat", "catclips", "catsranked"],
     },
     {
-        "title": "Wild Cat Moments",
-        "yt_queries": ["wild cat moment funny", "crazy cat video", "cats going crazy"],
-        "tt_hashtags": ["crazycats", "wildcat", "catmoment"],
+        "title": "Which Cat Is Funniest? 👀",
+        "yt_queries": ["funniest cat vote video", "funny cat reaction original", "best cat moment viral"],
+        "tt_hashtags": ["funnycat", "catpoll", "funnycats"],
     },
     {
-        "title": "Unhinged Cats",
-        "yt_queries": ["unhinged cat video", "cats being unhinged", "cat losing it funny"],
+        "title": "Unhinged Cats Ranked 😭",
+        "yt_queries": ["unhinged cat video funny", "cats being unhinged original", "cat losing it viral"],
         "tt_hashtags": ["unhingedcat", "chaoticcat", "crazycats"],
     },
     {
-        "title": "Cats Caught Being Chaotic",
-        "yt_queries": ["chaotic cat video", "cat causing chaos funny", "cats destroying things"],
+        "title": "Wild Cat Moments 🐾",
+        "yt_queries": ["wild cat moment funny original", "crazy cat video viral", "cat going crazy funny clip"],
+        "tt_hashtags": ["crazycats", "wildcat", "catmoment"],
+    },
+    {
+        "title": "Cats Caught Being Chaotic 💀",
+        "yt_queries": ["chaotic cat video original", "cat causing chaos funny", "cat destroying things viral"],
         "tt_hashtags": ["chaoticcat", "catchaos", "funnycats"],
     },
     {
-        "title": "Weirdest Cat Clips",
-        "yt_queries": ["weird cat video funny", "strange cat behavior funny", "cats being weird"],
-        "tt_hashtags": ["weirdcat", "catsbeingweird", "funnycats"],
-    },
-    {
-        "title": "Cats Gone Crazy",
-        "yt_queries": ["cat going crazy funny", "cat zoomies funny", "cats running wild"],
-        "tt_hashtags": ["catzoomies", "crazycat", "funnycats"],
-    },
-    {
-        "title": "Funniest Cat Reactions",
-        "yt_queries": ["funny cat reaction video", "cat reacting funny", "cat surprised reaction"],
+        "title": "Top 5 Cat Reactions 😹",
+        "yt_queries": ["funny cat reaction video original", "cat surprised reaction viral", "cat reacting funny clip"],
         "tt_hashtags": ["catreaction", "funnycat", "catsoftiktok"],
     },
     {
-        "title": "Cats Doing the Most",
-        "yt_queries": ["cat doing the most funny", "extra cat funny", "dramatic cat video"],
-        "tt_hashtags": ["dramaticcat", "funnycat", "catdrama"],
+        "title": "Cats Being Weird 😂",
+        "yt_queries": ["weird cat video funny original", "strange cat behavior viral", "cats being weird caught on camera"],
+        "tt_hashtags": ["weirdcat", "catsbeingweird", "funnycats"],
+    },
+    {
+        "title": "Funniest Cats On The Internet 🌐",
+        "yt_queries": ["funniest cat on internet original", "most viewed cat video funny", "viral cat clip famous"],
+        "tt_hashtags": ["funnycat", "internetcat", "funnycats"],
+    },
+    {
+        "title": "Cats Are Built Different 😤",
+        "yt_queries": ["cat built different funny", "cat acting crazy original viral", "unhinged cat clip funny"],
+        "tt_hashtags": ["catsdifferent", "funnycat", "crazycats"],
+    },
+    {
+        "title": "Cats That Went Viral 🔥",
+        "yt_queries": ["cat that went viral original", "famous cat video clip", "viral cat funny moment original"],
+        "tt_hashtags": ["viralcat", "famouscat", "funnycats"],
+    },
+    {
+        "title": "Top Cat Moments You Need To See 👁️",
+        "yt_queries": ["best cat moment video original", "top cat clip viral funny", "must see cat video original"],
+        "tt_hashtags": ["topcat", "catmoments", "funnycats"],
     },
 ]
 
 # ── Description templates ─────────────────────────────────────────────────────
 
 DESCRIPTION_INTROS = [
-    "Watch these hilarious cats ranked from funny to FUNNIEST!",
-    "We found the internet's best cat clips and ranked them so you don't have to!",
-    "Which cat deserves the #1 spot? You decide!",
-    "These cats are on another level — ranked from wild to WILDEST!",
-    "The ultimate cat ranking has arrived. Do you agree with #1?",
+    "These cats are absolutely unhinged 😂 Ranked from funny to FUNNIEST!",
+    "We found the internet's most viral cat clips and ranked them so you don't have to!",
+    "Which cat deserves the #1 spot? Drop your vote in the comments 👇",
+    "These cats are built different — ranked from wild to WILDEST!",
+    "The ultimate cat ranking has arrived. Do you agree with #1? 🏆",
+    "Your daily dose of certified unhinged cats, ranked 😹",
+    "These clips broke the internet for a reason 😱 Do you agree with the ranking?",
 ]
 
 DESCRIPTION_CTAs = [
-    "Which one was your fav? Comment below!",
+    "Which one was your fav? Comment below! 👇",
     "Do you agree with the ranking? Let us know!",
-    "Which clip should be #1? Drop your take!",
-    "Tag someone who needs to see this!",
+    "Which clip should be #1? Drop your take 💬",
+    "Tag someone who needs to see this 😂",
+    "Like if #1 actually got you 😹",
+    "Comment your ranking! Do you agree? 👀",
 ]
 
 DESCRIPTION_FOOTER = """
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
-Subscribe for daily cat content — new videos every day!
-Follow us: @CatCentral
+Subscribe for daily cat content — new videos every day! 🐱
 ━━━━━━━━━━━━━━━━━━━━━━━━━━"""
 
 BASE_TAGS = [

@@ -29,6 +29,8 @@ from pathlib import Path
 
 import yt_dlp
 
+from .viral_db import ViralClipDB
+
 logger = logging.getLogger(__name__)
 
 # ── Comment timestamp parsing ─────────────────────────────────────────────────
@@ -81,7 +83,8 @@ CLIPS_FROM_FIRST_RANKING  = 3
 CLIPS_FROM_SECOND_RANKING = 2
 
 # Max ranking videos analysed to build the cross-reference popularity map.
-RANKING_ANALYSE_LIMIT = 10
+# Higher = better cross-channel viral-clip validation; diminishing returns after 15.
+RANKING_ANALYSE_LIMIT = 15
 
 # Large, varied query set — we cast a wide net then filter by 1M+ views.
 RANKING_SOURCE_QUERIES = [
@@ -203,6 +206,7 @@ class VideoScraper:
     def __init__(self, config):
         self.config = config
         self._used: dict[str, dict] = self._load_used()
+        self._viral_db = ViralClipDB(config.viral_clips_path)
 
     # ── Persistence ────────────────────────────────────────────────────────────
 
@@ -859,6 +863,10 @@ class VideoScraper:
                     "_ranking_vid_id":  rv_id,
                     "_ranking_views":   rv_views,
                 })
+                # Persist to viral DB — verified standalone clip from a viral ranking
+                self._viral_db.record(
+                    src_id, src_url, src_title, views, rv_id, rv_views
+                )
 
         # ── Route 2: chapters present but no description links ────────────────
         # Skip entirely when Gemini is available — Route 3a handles this better
@@ -934,6 +942,11 @@ class VideoScraper:
                                     "_ranking_vid_id": rv_id,
                                     "_ranking_views":  rv_views,
                                 })
+                                clip_url_r2 = f"https://www.youtube.com/watch?v={vid_id}"
+                                self._viral_db.record(
+                                    vid_id, clip_url_r2, title,
+                                    views, rv_id, rv_views,
+                                )
                                 found_original = True
                                 logger.debug(
                                     f"      Route2 chapter '{raw_label}'"
@@ -993,60 +1006,90 @@ class VideoScraper:
                     sq         = gc["search_query"]
                     clip_id_g  = f"{rv_id}_{int(start)}"
 
-                    # Step 1: Always try to find the ORIGINAL standalone clip
-                    # (original clips look better — no ranking overlay burned in)
+                    # Step 1: Always try to find the ORIGINAL standalone clip.
+                    # 7-query cascade: starts with the most specific query and
+                    # progressively broadens.  The first match that passes all
+                    # filters wins.  Using more queries dramatically increases
+                    # the chance of finding the exact viral clip that the ranking
+                    # video featured — which is the whole point.
+                    desc = gc.get("description", "")
+                    sq_words = sq.split() if sq else []
+                    _queries_3a = list(dict.fromkeys(filter(None, [
+                        # Most specific — exact Gemini query + "original"
+                        f"{sq} original" if sq else None,
+                        # Exact query + platform hint
+                        f"{sq} funny cat" if sq else None,
+                        # Drop the last word (avoids over-specific adjectives)
+                        (" ".join(sq_words[:-1]) + " cat original")
+                        if len(sq_words) > 2 else None,
+                        # Use Gemini description words instead of search_query
+                        " ".join(desc.split()[:6]) + " cat" if desc else None,
+                        # Bare search query, no extras
+                        sq if sq else None,
+                        # First 3 words only (most salient action/subject)
+                        " ".join(sq_words[:3]) + " cat funny"
+                        if len(sq_words) >= 3 else None,
+                        # Last-resort: main noun phrase from description
+                        " ".join(desc.split()[:4]) + " cat" if desc else None,
+                    ])))
                     found_original = False
-                    if sq:
-                        for cq in [f"{sq} original", f"{sq} funny cat", sq]:
-                            if found_original:
-                                break
-                            try:
-                                entries = self._ydl_extract_flat(
-                                    f"ytsearch5:{cq}", playlist_end=5
+                    for cq in _queries_3a:
+                        if found_original:
+                            break
+                        try:
+                            entries = self._ydl_extract_flat(
+                                f"ytsearch8:{cq}", playlist_end=8
+                            )
+                            for e in entries:
+                                if not e:
+                                    continue
+                                vid_id = e.get("id", "")
+                                if (not vid_id or vid_id in seen_ids
+                                        or self._is_used(vid_id)):
+                                    continue
+                                title = e.get("title", "")
+                                if (not _is_cat_video(title)
+                                        or _is_unwanted(title)
+                                        or not _is_english(title)):
+                                    continue
+                                dur = e.get("duration") or 0
+                                if dur and dur > 90:
+                                    continue
+                                views = e.get("view_count") or 0
+                                # Clips in viral rankings must have real traction
+                                if views > 0 and views < 100_000:
+                                    continue
+                                seen_ids.add(vid_id)
+                                clip_url = f"https://www.youtube.com/watch?v={vid_id}"
+                                clips.append({
+                                    "id":               vid_id,
+                                    "url":              clip_url,
+                                    "title":            title,
+                                    "start_time":       None,
+                                    "end_time":         None,
+                                    "platform":         "youtube",
+                                    "view_count":       views,
+                                    "like_count":       e.get("like_count") or 0,
+                                    "duration":         dur,
+                                    "_ranking_vid_id":  rv_id,
+                                    "_ranking_views":   rv_views,
+                                    "_visual_matched":  True,
+                                    "_gemini_detected": True,
+                                })
+                                # Record in viral DB — this clip appeared in a
+                                # 1M+ view ranking video, so it's proven content.
+                                self._viral_db.record(
+                                    vid_id, clip_url, title, views,
+                                    rv_id, rv_views,
                                 )
-                                for e in entries:
-                                    if not e:
-                                        continue
-                                    vid_id = e.get("id", "")
-                                    if (not vid_id or vid_id in seen_ids
-                                            or self._is_used(vid_id)):
-                                        continue
-                                    title = e.get("title", "")
-                                    if (not _is_cat_video(title)
-                                            or _is_unwanted(title)
-                                            or not _is_english(title)):
-                                        continue
-                                    dur = e.get("duration") or 0
-                                    if dur and dur > 90:
-                                        continue
-                                    views = e.get("view_count") or 0
-                                    # Clips in viral rankings must have real traction
-                                    if views > 0 and views < 100_000:
-                                        continue
-                                    seen_ids.add(vid_id)
-                                    clips.append({
-                                        "id":               vid_id,
-                                        "url":              f"https://www.youtube.com/watch?v={vid_id}",
-                                        "title":            title,
-                                        "start_time":       None,
-                                        "end_time":         None,
-                                        "platform":         "youtube",
-                                        "view_count":       views,
-                                        "like_count":       e.get("like_count") or 0,
-                                        "duration":         dur,
-                                        "_ranking_vid_id":  rv_id,
-                                        "_ranking_views":   rv_views,
-                                        "_visual_matched":  True,
-                                        "_gemini_detected": True,
-                                    })
-                                    found_original = True
-                                    logger.debug(
-                                        f"      @{start:.0f}s  sq='{sq}'  "
-                                        f"→ original found: {vid_id}"
-                                    )
-                                    break
-                            except Exception as ex:
-                                logger.debug(f"Route 3a search failed '{cq}': {ex}")
+                                found_original = True
+                                logger.debug(
+                                    f"      @{start:.0f}s  sq='{sq}'  "
+                                    f"→ original found: {vid_id}"
+                                )
+                                break
+                        except Exception as ex:
+                            logger.debug(f"Route 3a search failed '{cq}': {ex}")
 
                     # Step 2: Fall back to direct slice only if no original found
                     # and Gemini is confident enough about the timestamp.
@@ -1252,8 +1295,12 @@ class VideoScraper:
 
         # ── Pick clips: 3 from #1 ranking video, 2 from #2 ───────────────────
         def _rank_key(c: dict) -> tuple:
+            viral_score = self._viral_db.get_viral_score(c["id"])
+            cross_count = cross_map.get(c["id"], {}).get("_cross_count", 0)
             return (
-                -cross_map.get(c["id"], {}).get("_cross_count", 0),
+                # Clips that appear in MULTIPLE viral ranking videos rank first
+                -(viral_score * 3 + cross_count),
+                # Then by standalone view count
                 -c.get("view_count", 0),
             )
 
@@ -1326,6 +1373,11 @@ class VideoScraper:
                 url_seen.add(url)
                 url_clean.append(c)
         selected = url_clean
+
+        # Annotate every selected clip with its viral_score from the persistent DB
+        # so downstream (video_editor, Remotion overlay) can render badges.
+        for c in selected:
+            c["_viral_score"] = self._viral_db.get_viral_score(c["id"])
 
         result = _dedup(selected)
         logger.info(f"Returning {len(result)} candidates from viral ranking sources")

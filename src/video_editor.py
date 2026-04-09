@@ -623,6 +623,7 @@ def _render_with_remotion(
     output_path: Path,
     config,
     labels: list[str],
+    viral_scores: list[int] | None = None,
     on_progress=None,
 ) -> Path | None:
     """
@@ -659,6 +660,7 @@ def _render_with_remotion(
     try:
         # Symlink source clips into public/clips/{session_id}/
         clip_refs = []
+        scores = viral_scores or [0] * n
         for i, (path, label) in enumerate(zip(clip_paths, labels)):
             dest_name = f"clip_{i}.mp4"
             dest      = clips_public / dest_name
@@ -672,14 +674,19 @@ def _render_with_remotion(
                 "rank":           n - i,
                 "label":          _make_short_label(label),
                 "durationFrames": clip_dur_frames,
+                "viralScore":     scores[i] if i < len(scores) else 0,
             })
 
+        # Enable 3-2-1 countdown before the #1 reveal whenever we have 5+ clips
+        has_countdown = n >= 5
+
         props = {
-            "clips":       clip_refs,
-            "title":       title,
-            "watermark":   getattr(config, "watermark_text", "@CatCentral"),
-            "totalFrames": clip_dur_frames * n,
-            "hasWoosh":    has_woosh,
+            "clips":        clip_refs,
+            "title":        title,
+            "watermark":    getattr(config, "watermark_text", "@CatCentral"),
+            "totalFrames":  clip_dur_frames * n,
+            "hasWoosh":     has_woosh,
+            "hasCountdown": has_countdown,
         }
         props_file.write_text(_json.dumps(props))
 
@@ -745,6 +752,7 @@ def create_ranking_video(
     on_progress=None,
     tts_audio: dict | None = None,   # kept for API compat — ignored
     clip_labels: list[str] | None = None,
+    viral_scores: list[int] | None = None,
 ) -> Path:
     """
     Build a ranking-style Shorts video from cat clips.
@@ -782,7 +790,10 @@ def create_ranking_video(
                 ready.append(src)
 
         # ── 1. Try Remotion (animated React overlay) ────────────────────────
-        out = _render_with_remotion(ready, title, output_path, config, labels, on_progress)
+        out = _render_with_remotion(
+            ready, title, output_path, config, labels,
+            viral_scores=viral_scores, on_progress=on_progress,
+        )
         if out:
             logger.info(f"Ranking video created (Remotion): {output_path}")
             return out
