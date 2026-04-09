@@ -122,6 +122,7 @@ def _is_unwanted(title: str) -> bool:
       • Ranking / compilation / reaction meta-content
       • Non-real-cat content: AI, CGI, filters, animations, costumes, Zoom calls,
         news clips where humans are using cat filters, etc.
+      • Meta / editing content where the cat is incidental rather than the subject
     """
     if not title:
         return False
@@ -142,6 +143,12 @@ def _is_unwanted(title: str) -> bool:
         # viral congressional hearing clip)
         "congress", "senator", "hearing", "politician", "lawyer",
         "zoom call", "zoom meeting", "video call", "on camera filter",
+        # Meta / editing content — cat is incidental, not the primary subject
+        "how i edit", "how to edit", "editing tutorial", "video editing",
+        "premiere pro", "davinci resolve", "final cut pro", "sony vegas",
+        "sound design", "audio edit", "meow edit", "meow remix",
+        "voice changer", "voice effect", "sound effect tutorial",
+        "screen record", "screen capture",
         # Generic non-cat
         "dog", "hamster", "rabbit", "bird", "parrot",
     ]
@@ -635,10 +642,14 @@ class VideoScraper:
                 "  is_real_cat: true only if a LIVE REAL cat (not animated, CGI, or Zoom/camera filter)\n"
                 "  is_animated: true if cartoon, animation, or CGI\n"
                 "  is_english: true if any on-screen text is English, or no text is visible\n"
+                "  is_cat_primary_subject: true only if the cat is the MAIN focus and occupies the majority of screen attention (NOT a human editing video software, NOT a reaction clip, NOT the cat barely visible in background)\n"
+                "  is_screen_recording: true if this frame shows video editing software, a desktop screen recording, someone editing audio/video, or any meta-content about video creation\n"
                 "  view_count_estimate: 1=unknown 2=low 3=medium 4=high 5=extremely viral\n"
                 "  confidence: 1-10 confidence in the timestamp accuracy\n\n"
                 "Rules:\n"
                 "- EXCLUDE any clip where is_real_cat is false or is_animated is true\n"
+                "- EXCLUDE any clip where is_cat_primary_subject is false\n"
+                "- EXCLUDE any clip where is_screen_recording is true\n"
                 "- EXCLUDE clips that appear to be a human using a cat filter (Zoom, Snapchat, etc.)\n"
                 "- Timestamps must be within 0 and " + str(int(rv_duration)) + "s\n"
                 "- Each clip must be at least 3 seconds long\n"
@@ -647,6 +658,7 @@ class VideoScraper:
                 '"description":"orange tabby slides off leather couch in slow motion",'
                 '"search_query":"cat slides off couch funny original",'
                 '"is_real_cat":true,"is_animated":false,"is_english":true,'
+                '"is_cat_primary_subject":true,"is_screen_recording":false,'
                 '"view_count_estimate":4,"confidence":8}]\n',
             ]
             for ts, frame_bytes in frame_data:
@@ -673,10 +685,14 @@ class VideoScraper:
             for item in clips_raw:
                 if not isinstance(item, dict):
                     continue
-                # Hard content filter — drop animated and non-real-cat clips
+                # Hard content filter — drop animated, non-real-cat, and meta clips
                 if item.get("is_animated", False):
                     continue
                 if not item.get("is_real_cat", True):
+                    continue
+                if not item.get("is_cat_primary_subject", True):
+                    continue
+                if item.get("is_screen_recording", False):
                     continue
                 start = float(item.get("start_time", 0))
                 end   = float(item.get("end_time", start + SEGMENT_TARGET_SECS))
@@ -686,15 +702,17 @@ class VideoScraper:
                 start = max(0.0, min(start, rv_duration))
                 end   = min(end, rv_duration)
                 valid.append({
-                    "start_time":          start,
-                    "end_time":            end,
-                    "description":         str(item.get("description", ""))[:120],
-                    "search_query":        str(item.get("search_query", ""))[:80],
-                    "is_real_cat":         bool(item.get("is_real_cat", True)),
-                    "is_animated":         bool(item.get("is_animated", False)),
-                    "is_english":          bool(item.get("is_english", True)),
-                    "view_count_estimate": int(item.get("view_count_estimate", 1)),
-                    "confidence":          int(item.get("confidence", 5)),
+                    "start_time":             start,
+                    "end_time":               end,
+                    "description":            str(item.get("description", ""))[:120],
+                    "search_query":           str(item.get("search_query", ""))[:80],
+                    "is_real_cat":            bool(item.get("is_real_cat", True)),
+                    "is_animated":            bool(item.get("is_animated", False)),
+                    "is_english":             bool(item.get("is_english", True)),
+                    "is_cat_primary_subject": bool(item.get("is_cat_primary_subject", True)),
+                    "is_screen_recording":    bool(item.get("is_screen_recording", False)),
+                    "view_count_estimate":    int(item.get("view_count_estimate", 1)),
+                    "confidence":             int(item.get("confidence", 5)),
                 })
 
             # Best clips first: highest confidence, then most viral estimate
@@ -836,8 +854,11 @@ class VideoScraper:
         # ── Route 2: chapters present but no description links ────────────────
         if not clips and chapters:
             logger.info(f"    No description links — extracting {len(chapters)} chapters")
-            # Treat the ranking video itself as a source and slice by chapters
+            # Treat the ranking video itself as a source and slice by chapters.
+            # Enforce a minimum gap so adjacent clips from the same video can't
+            # overlap or show the same cat moment due to keyframe alignment.
             rv_duration = info.get("duration") or 0
+            last_end: float = -999.0
             for ch in chapters:
                 start    = float(ch.get("start_time", 0))
                 end      = float(ch.get("end_time", start + SEGMENT_TARGET_SECS))
@@ -846,10 +867,14 @@ class VideoScraper:
                 seg_len  = end - start
                 if seg_len < 3 or seg_len > 45:
                     continue
+                # Require at least 15s gap from previous accepted clip
+                if start < last_end + 15:
+                    continue
                 clip_id  = f"{rv_id}_{int(start)}"
                 if self._is_used(clip_id) or clip_id in seen_ids:
                     continue
                 seen_ids.add(clip_id)
+                last_end = end
                 label = re.sub(r'^#?\d+[\.\-:\s]+', '', ch.get("title") or "").strip()
                 clips.append({
                     "id":               clip_id,
@@ -857,7 +882,7 @@ class VideoScraper:
                     "title":            label or rv["title"][:30],
                     "start_time":       start,
                     "end_time":         min(end, start + SEGMENT_TARGET_SECS),
-                    "platform":         "youtube",
+                    "platform":         "ranking_slice",
                     "view_count":       rv_views,
                     "like_count":       0,
                     "duration":         seg_len,
@@ -867,11 +892,11 @@ class VideoScraper:
 
         # ── Route 3: Gemini Vision analysis + targeted search for originals ────
         if not clips:
-            api_key    = os.getenv("GEMINI_API_KEY", "")
+            api_key     = os.getenv("GEMINI_API_KEY", "")
             rv_duration = info.get("duration") or 0
             gemini_clips: list[dict] = []
 
-                    # ── Route 3a: multi-frame Gemini analysis (API key required) ────
+            # ── Route 3a: multi-frame Gemini analysis (API key required) ────────
             if api_key and rv_duration >= 10:
                 gemini_clips = self._gemini_analyze_ranking_video(
                     rv["url"], rv_duration, chapters, api_key
@@ -889,41 +914,12 @@ class VideoScraper:
                     sq         = gc["search_query"]
                     clip_id_g  = f"{rv_id}_{int(start)}"
 
-                    if clip_id_g in seen_ids or self._is_used(clip_id_g):
-                        continue
-                    seen_ids.add(clip_id_g)
-
-                    if confidence >= 6:
-                        # High confidence — Gemini knows exactly where this clip
-                        # is in the ranking video; slice it directly.
-                        clips.append({
-                            "id":                 clip_id_g,
-                            "url":                rv["url"],
-                            "title":              gc["description"][:60] or rv["title"][:30],
-                            "start_time":         start,
-                            "end_time":           min(end, start + SEGMENT_TARGET_SECS),
-                            "platform":           "youtube",
-                            "view_count":         rv_views,
-                            "like_count":         0,
-                            "duration":           end - start,
-                            "_ranking_vid_id":    rv_id,
-                            "_ranking_views":     rv_views,
-                            "_gemini_detected":   True,
-                            "_gemini_confidence": confidence,
-                            "_view_estimate":     gc["view_count_estimate"],
-                        })
-                        logger.debug(
-                            f"      @{start:.0f}s–{end:.0f}s  "
-                            f"conf={confidence}  viral={gc['view_count_estimate']}  "
-                            f"→ direct slice"
-                        )
-
-                    elif sq:
-                        # Lower confidence timestamps — use Gemini's search_query
-                        # to find the original standalone clip on YouTube.
-                        found_one = False
+                    # Step 1: Always try to find the ORIGINAL standalone clip
+                    # (original clips look better — no ranking overlay burned in)
+                    found_original = False
+                    if sq:
                         for cq in [f"{sq} original", f"{sq} funny cat", sq]:
-                            if found_one:
+                            if found_original:
                                 break
                             try:
                                 entries = self._ydl_extract_flat(
@@ -945,9 +941,8 @@ class VideoScraper:
                                     if dur and dur > 90:
                                         continue
                                     views = e.get("view_count") or 0
-                                    # Require at least 10K views — clips featured
-                                    # in viral rankings should have some traction.
-                                    if views > 0 and views < 10_000:
+                                    # Clips in viral rankings must have real traction
+                                    if views > 0 and views < 100_000:
                                         continue
                                     seen_ids.add(vid_id)
                                     clips.append({
@@ -965,10 +960,42 @@ class VideoScraper:
                                         "_visual_matched":  True,
                                         "_gemini_detected": True,
                                     })
-                                    found_one = True
+                                    found_original = True
+                                    logger.debug(
+                                        f"      @{start:.0f}s  sq='{sq}'  "
+                                        f"→ original found: {vid_id}"
+                                    )
                                     break
                             except Exception as ex:
                                 logger.debug(f"Route 3a search failed '{cq}': {ex}")
+
+                    # Step 2: Fall back to direct slice only if no original found
+                    # and Gemini is confident enough about the timestamp.
+                    if not found_original and confidence >= 6:
+                        if clip_id_g in seen_ids or self._is_used(clip_id_g):
+                            continue
+                        seen_ids.add(clip_id_g)
+                        clips.append({
+                            "id":                 clip_id_g,
+                            "url":                rv["url"],
+                            "title":              gc["description"][:60] or rv["title"][:30],
+                            "start_time":         start,
+                            "end_time":           min(end, start + SEGMENT_TARGET_SECS),
+                            "platform":           "ranking_slice",
+                            "view_count":         rv_views,
+                            "like_count":         0,
+                            "duration":           end - start,
+                            "_ranking_vid_id":    rv_id,
+                            "_ranking_views":     rv_views,
+                            "_gemini_detected":   True,
+                            "_gemini_confidence": confidence,
+                            "_view_estimate":     gc["view_count_estimate"],
+                        })
+                        logger.debug(
+                            f"      @{start:.0f}s–{end:.0f}s  "
+                            f"conf={confidence}  viral={gc['view_count_estimate']}  "
+                            f"→ ranking slice fallback"
+                        )
 
             else:
                 # ── Route 3b: text-only fallback (no API key / Gemini failed) ─
@@ -1026,7 +1053,7 @@ class VideoScraper:
                             if dur and dur > 90:
                                 continue
                             views = e.get("view_count") or 0
-                            if views > 0 and views < 10_000:
+                            if views > 0 and views < 100_000:
                                 continue
                             seen_ids.add(vid_id)
                             clips.append({

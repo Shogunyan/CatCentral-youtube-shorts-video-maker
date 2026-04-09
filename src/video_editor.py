@@ -443,6 +443,13 @@ _PLATFORM_BLUR_REGIONS: dict[str, list[tuple]] = {
         ("iw-180", "ih-180", 180, 180),
         ("0",      "ih-100", 300, 100),
     ],
+    # Clips sliced directly from a ranking/countdown video retain the original
+    # creator's overlays (title bar + left-side rank panel). Always blur these
+    # regions so they don't conflict with our own ranking overlay.
+    "ranking_slice": [
+        ("0", "0",   215, 118),   # title/header bar across the top
+        ("0", "118", 215, 1800),  # left-side rank number panel
+    ],
     "unknown": [
         ("0",        "0",      180, 100),
         ("iw-180",   "0",      180, 100),
@@ -529,11 +536,16 @@ def _blur_source_watermarks(input_path: Path, output_path: Path, platform: str =
         vw, vh = _get_video_size(input_path)
     except Exception:
         vw, vh = 1920, 1080
-    regions_to_blur = []
-    for region in candidate_regions:
-        x, y, bw, bh = _resolve_region(region, vw, vh)
-        if _region_has_watermark(input_path, x, y, bw, bh):
-            regions_to_blur.append(region)
+    if platform == "ranking_slice":
+        # Ranking video overlays are always present — skip detection and
+        # unconditionally blur the title bar + left rank panel.
+        regions_to_blur = list(candidate_regions)
+    else:
+        regions_to_blur = []
+        for region in candidate_regions:
+            x, y, bw, bh = _resolve_region(region, vw, vh)
+            if _region_has_watermark(input_path, x, y, bw, bh):
+                regions_to_blur.append(region)
     if not regions_to_blur:
         shutil.copy2(input_path, output_path)
         return output_path
