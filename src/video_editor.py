@@ -11,11 +11,13 @@ Format (matching viral cat ranking channels):
   • Clips play full-screen behind the overlay
   • Moving @CatCentral watermark in corners
 """
+import json as _json
 import logging
 import re
 import shutil
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -576,6 +578,162 @@ def _blur_source_watermarks(input_path: Path, output_path: Path, platform: str =
     return output_path
 
 
+# ── Remotion renderer ─────────────────────────────────────────────────────────
+
+_REMOTION_DIR = Path(__file__).parent.parent / "remotion"
+
+
+def _ensure_remotion(on_progress=None) -> bool:
+    """
+    Check that Node.js is present and that Remotion packages are installed.
+    Runs 'npm install' automatically on first call (takes ~60 s).
+    Returns True when Remotion is ready.
+    """
+    if not shutil.which("node"):
+        logger.debug("Node.js not found — Remotion unavailable, using ffmpeg")
+        return False
+    if not (_REMOTION_DIR / "package.json").exists():
+        logger.debug("remotion/package.json missing — skipping Remotion")
+        return False
+    if not (_REMOTION_DIR / "node_modules" / "remotion").exists():
+        logger.info("Installing Remotion packages (first run — ~60 s)…")
+        if on_progress:
+            on_progress("Installing Remotion (first run, ~60 s)…")
+        try:
+            r = subprocess.run(
+                ["npm", "install", "--prefer-offline"],
+                cwd=_REMOTION_DIR,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+            if r.returncode != 0:
+                logger.warning(f"npm install failed:\n{r.stderr[-800:]}")
+                return False
+            logger.info("Remotion packages installed successfully.")
+        except Exception as exc:
+            logger.warning(f"npm install error: {exc}")
+            return False
+    return True
+
+
+def _render_with_remotion(
+    clip_paths: list[Path],
+    title: str,
+    output_path: Path,
+    config,
+    labels: list[str],
+    on_progress=None,
+) -> Path | None:
+    """
+    Render the ranking video with Remotion (React + headless Chrome).
+    Returns the output Path on success, None if Remotion is unavailable or fails
+    (the caller will then fall back to the ffmpeg pipeline).
+    """
+    if not _ensure_remotion(on_progress):
+        return None
+
+    fps               = 30
+    clip_dur_frames   = config.clip_duration * fps
+    n                 = len(clip_paths)
+    session_id        = uuid.uuid4().hex[:10]
+    clips_public      = _REMOTION_DIR / "public" / "clips" / session_id
+    clips_public.mkdir(parents=True, exist_ok=True)
+
+    # Expose woosh SFX to Remotion's static server
+    woosh_src  = _REMOTION_DIR.parent / "assets" / "sfx" / "woosh.mp3"
+    sfx_public = _REMOTION_DIR / "public" / "sfx"
+    has_woosh  = False
+    if woosh_src.exists():
+        sfx_public.mkdir(parents=True, exist_ok=True)
+        sfx_dest = sfx_public / "woosh.mp3"
+        if not sfx_dest.exists():
+            try:
+                sfx_dest.symlink_to(woosh_src.resolve())
+            except Exception:
+                shutil.copy2(woosh_src, sfx_dest)
+        has_woosh = sfx_dest.exists()
+
+    props_file = _REMOTION_DIR / f"_props_{session_id}.json"
+
+    try:
+        # Symlink source clips into public/clips/{session_id}/
+        clip_refs = []
+        for i, (path, label) in enumerate(zip(clip_paths, labels)):
+            dest_name = f"clip_{i}.mp4"
+            dest      = clips_public / dest_name
+            try:
+                dest.symlink_to(path.resolve())
+            except Exception:
+                shutil.copy2(path, dest)
+
+            clip_refs.append({
+                "path":           f"{session_id}/{dest_name}",
+                "rank":           n - i,
+                "label":          _make_short_label(label),
+                "durationFrames": clip_dur_frames,
+            })
+
+        props = {
+            "clips":       clip_refs,
+            "title":       title,
+            "watermark":   getattr(config, "watermark_text", "@CatCentral"),
+            "totalFrames": clip_dur_frames * n,
+            "hasWoosh":    has_woosh,
+        }
+        props_file.write_text(_json.dumps(props))
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if on_progress:
+            on_progress("Rendering with Remotion (animated overlay)…")
+        logger.info(f"Remotion render: {n} clips × {config.clip_duration}s")
+
+        cmd = [
+            "npx", "--yes", "remotion", "render",
+            "src/index.tsx",
+            "CatRanking",
+            str(output_path.resolve()),
+            f"--props={props_file.resolve()}",
+            "--codec=h264",
+            "--crf=18",
+            "--log=error",
+            "--overwrite",
+            "--concurrency=4",
+        ]
+        result = subprocess.run(
+            cmd,
+            cwd=_REMOTION_DIR,
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+
+        if result.returncode != 0:
+            logger.warning(
+                f"Remotion render failed (rc={result.returncode})"
+                f"\n{result.stderr[-1500:]}"
+            )
+            return None
+
+        if output_path.exists() and output_path.stat().st_size > 50_000:
+            logger.info(f"Remotion render complete → {output_path}")
+            return output_path
+
+        logger.warning("Remotion output missing or too small")
+        return None
+
+    except subprocess.TimeoutExpired:
+        logger.warning("Remotion render timed out (>10 min)")
+        return None
+    except Exception as exc:
+        logger.warning(f"Remotion render error: {exc}")
+        return None
+    finally:
+        props_file.unlink(missing_ok=True)
+        shutil.rmtree(clips_public, ignore_errors=True)
+
+
 # ── Main public function ──────────────────────────────────────────────────────
 
 def create_ranking_video(
@@ -591,8 +749,8 @@ def create_ranking_video(
     """
     Build a ranking-style Shorts video from cat clips.
 
-    Format: jumps straight into clip #N with the full ranking list overlay
-    on the left side of every frame. No intro card. No TTS.
+    Tries Remotion (React + headless Chrome, animated overlays) first.
+    Falls back to the plain ffmpeg pipeline if Remotion is unavailable.
     """
     if len(clip_paths) < 2:
         raise ValueError(f"Need at least 2 clips, got {len(clip_paths)}")
@@ -608,18 +766,39 @@ def create_ranking_video(
 
     clip_duration = config.clip_duration
 
+    # ── Pre-blur clips that carry a burned-in overlay (ranking_slice, TikTok…) ─
+    # Both the Remotion and ffmpeg paths need clean source files.
+    with tempfile.TemporaryDirectory(prefix="catcentral_preblur_") as blurtmp:
+        btmp  = Path(blurtmp)
+        ready: list[Path] = []
+        for idx, (src, platform) in enumerate(zip(clip_paths, platforms)):
+            regions = _PLATFORM_BLUR_REGIONS.get(platform, _PLATFORM_BLUR_REGIONS["unknown"])
+            if regions:
+                _step(f"Removing {platform} watermark — clip {idx + 1}/{n}…")
+                dst = btmp / f"blur_{idx}.mp4"
+                _blur_source_watermarks(src, dst, platform)
+                ready.append(dst)
+            else:
+                ready.append(src)
+
+        # ── 1. Try Remotion (animated React overlay) ────────────────────────
+        out = _render_with_remotion(ready, title, output_path, config, labels, on_progress)
+        if out:
+            logger.info(f"Ranking video created (Remotion): {output_path}")
+            return out
+
+    # ── 2. FFmpeg fallback ─────────────────────────────────────────────────────
+    _step("Using ffmpeg renderer…")
     with tempfile.TemporaryDirectory(prefix="catcentral_") as tmpdir:
         tmp = Path(tmpdir)
         processed: list[Path] = []
 
-        # Pre-load woosh sound (generated once, reused for every transition)
         woosh = _get_woosh()
         if woosh:
             _step("Woosh SFX ready…")
 
-        # ── 1. Process each clip ─────────────────────────────────────────────
         for idx, src in enumerate(clip_paths):
-            rank     = n - idx   # n=5,idx=0 → rank 5 first; idx=4 → rank 1 last
+            rank     = n - idx
             step1    = tmp / f"rank{rank}.mp4"
             platform = platforms[idx]
 
@@ -642,7 +821,6 @@ def create_ranking_video(
                 n=n,
             )
 
-            # Add woosh at the start of every clip (signals "new clip incoming")
             if woosh:
                 woosh_out = tmp / f"woosh_rank{rank}.mp4"
                 try:
@@ -654,17 +832,15 @@ def create_ranking_video(
             else:
                 processed.append(step1)
 
-        # ── 2. Concatenate ───────────────────────────────────────────────────
         _step("Concatenating all clips…")
         joined = tmp / "joined.mp4"
         _concat_clips(processed, joined)
 
-        # ── 3. Add watermark ─────────────────────────────────────────────────
         _step(f"Adding {config.watermark_text} watermark…")
         output_path.parent.mkdir(parents=True, exist_ok=True)
         _add_watermark(joined, output_path, config.watermark_text)
 
-    logger.info(f"Ranking video created: {output_path}")
+    logger.info(f"Ranking video created (ffmpeg): {output_path}")
     return output_path
 
 
