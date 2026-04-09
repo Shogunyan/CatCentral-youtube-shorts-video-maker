@@ -149,6 +149,15 @@ def _is_unwanted(title: str) -> bool:
         "sound design", "audio edit", "meow edit", "meow remix",
         "voice changer", "voice effect", "sound effect tutorial",
         "screen record", "screen capture",
+        # Music production / remix — cat is a sound source, not the subject
+        # (e.g. The Kiffness, lofi cat beats, cat song collabs)
+        "kiffness",
+        "lofi cat", "lo-fi cat", "lofi beats", "lo-fi beats",
+        "made a song", "made music", "cat song", "cat music",
+        "cat remix", "remix with", "collab with my cat",
+        "original song", "music video", "music production",
+        # Compilations / multi-clip videos (we want single original moments)
+        "compilation", "best of", "top moments", "funny moments",
         # Generic non-cat
         "dog", "hamster", "rabbit", "bird", "parrot",
     ]
@@ -1228,6 +1237,25 @@ class VideoScraper:
             ]
             selected.extend(reusable[: want - len(selected)])
             logger.info(f"  Reuse fill: now have {len(selected)}/{want} clips")
+
+        # ── URL dedup: one original standalone video per clip slot ─────────────
+        # Prevents the same YouTube video from filling multiple rank slots.
+        # Segment clips (start_time != None) are exempt — they're different
+        # timestamped moments from a ranking compilation and are already diverse.
+        url_seen: set[str] = set()
+        url_clean: list[dict] = []
+        for c in selected:
+            url = c.get("url", "")
+            if c.get("start_time") is not None:
+                url_clean.append(c)   # segment from ranking video — allow multiple
+            elif url and url in url_seen:
+                logger.debug(
+                    f"  URL-dedup: skipping duplicate standalone {c.get('id')} ({url[-40:]})"
+                )
+            else:
+                url_seen.add(url)
+                url_clean.append(c)
+        selected = url_clean
 
         result = _dedup(selected)
         logger.info(f"Returning {len(result)} candidates from viral ranking sources")
