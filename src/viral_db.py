@@ -47,8 +47,11 @@ class ViralClipDB:
         return {}
 
     def _save(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(json.dumps(self._data, indent=2))
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._path.write_text(json.dumps(self._data, indent=2))
+        except Exception as e:
+            logger.warning(f"ViralClipDB: failed to save {self._path}: {e}")
 
     # ── Write ─────────────────────────────────────────────────────────────────
 

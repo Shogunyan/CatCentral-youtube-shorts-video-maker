@@ -227,8 +227,11 @@ LOG_LEVEL={log_level}
 # Without it the system still works — just uses text-based search instead.
 GEMINI_API_KEY={gemini_api_key}
 """
-    ENV_PATH.write_text(content)
-    print(green(f"  ✓ .env written to {ENV_PATH}"))
+    try:
+        ENV_PATH.write_text(content)
+        print(green(f"  ✓ .env written to {ENV_PATH}"))
+    except OSError as e:
+        print(red(f"  ✗ Could not write .env: {e}"))
 
 
 if __name__ == "__main__":

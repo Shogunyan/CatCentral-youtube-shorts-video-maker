@@ -201,8 +201,9 @@ class VideoTracker:
             )
 
             # Attempt re-upload
-            video_path = Path(data.get("video_path", ""))
-            if not video_path.exists():
+            _vp_str = data.get("video_path") or ""
+            video_path = Path(_vp_str) if _vp_str else None
+            if not video_path or not video_path.exists():
                 _log(
                     f"⚠️  Re-upload ready but file not found: {video_path.name}. "
                     "Run the pipeline once to generate a fresh video instead."

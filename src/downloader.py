@@ -301,7 +301,7 @@ class Downloader:
             import google.generativeai as genai
 
             genai.configure(api_key=api_key)
-            model = genai.GenerativeModel("gemini-1.5-flash")
+            model = genai.GenerativeModel("gemini-2.0-flash")
 
             target   = getattr(self.config, "clip_duration", 25)
             n_frames = min(8, max(3, int(duration / 5)))
@@ -347,8 +347,8 @@ class Downloader:
                 return None
             result = _json.loads(raw[brace:])
 
-            start = float(result["start_time"])
-            end   = float(result["end_time"])
+            start = float(result.get("start_time") or 0)
+            end   = float(result.get("end_time") or 0)
 
             if end <= start or (end - start) < target * 0.5:
                 return None

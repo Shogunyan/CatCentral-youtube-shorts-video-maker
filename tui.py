@@ -449,6 +449,7 @@ class DashboardScreen(Screen):
 
     _running: reactive[bool] = reactive(False)
     _sched_active: reactive[bool] = reactive(False)
+    _sched_gen: int = 0  # incremented each time a new sched loop starts
 
     def _is_running(self) -> bool:
         return self.__dict__.get("_pipeline_running", False)
@@ -632,18 +633,20 @@ class DashboardScreen(Screen):
         btn = self.query_one("#btn-sched", Button)
         if self._sched_active:
             self._sched_active = False
+            self._sched_gen += 1  # invalidate the running loop
             btn.label = "📅  Start Scheduler"
             self._log("⏹  Scheduler stopped.")
         else:
             self._sched_active = True
+            self._sched_gen += 1  # new generation — old loop will exit
             btn.label = "⏹  Stop Scheduler"
             times_str = ", ".join(self._cfg.upload_times)
             self._log(f"📅  Scheduler active.  Upload times: {times_str}")
             self._refresh_sched_label()
-            self._sched_loop()
+            self._sched_loop(self._sched_gen)
 
     @work(thread=True)
-    def _sched_loop(self) -> None:
+    def _sched_loop(self, gen: int) -> None:
         import time
         import schedule as sch
 
@@ -653,9 +656,13 @@ class DashboardScreen(Screen):
                 lambda: self.app.call_from_thread(self._start_pipeline)
             ).tag("catcentral")
 
-        while self._sched_active:
+        while self._sched_active and self._sched_gen == gen:
             sch.run_pending()
             time.sleep(30)
+
+        # Clean up jobs when this generation exits
+        if self._sched_gen != gen:
+            sch.clear("catcentral")
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
