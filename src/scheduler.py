@@ -83,19 +83,14 @@ class Pipeline:
                          f"♻️  {reset_count} clip(s) recycled back into the pool (>14 days old)")
 
         # ── 1. Pick theme + scrape matching clips ─────────────────────────────
-        self._report(3, "✏  Picking video theme…",
-                     "Choosing title and matching search terms")
+        self._report(3, "✏  Picking video theme…", "Generating title and description")
         caption = generate_caption(n)
         title = caption["title"]
         self._report(4, "✏  Theme picked", f"Title: {title}")
 
         self._report(5, "🔍  Scraping viral cat videos…",
-                     f"Searching for clips matching: {title}")
-        candidates = self.scraper.get_candidates(
-            want=n * 5,
-            yt_queries=caption.get("yt_queries"),
-            tt_hashtags=caption.get("tt_hashtags"),
-        )
+                     "Searching for 1M+ view cat ranking Shorts…")
+        candidates = self.scraper.get_candidates(want=n * 5)
         if not candidates:
             self._report(5, "❌  Scraping failed",
                          "No candidates found — check internet connection")
