@@ -590,7 +590,11 @@ def _ensure_remotion(on_progress=None) -> bool:
     Returns True when Remotion is ready.
     """
     if not shutil.which("node"):
-        logger.debug("Node.js not found — Remotion unavailable, using ffmpeg")
+        logger.warning(
+            "Node.js not found — Remotion unavailable, falling back to ffmpeg. "
+            "To enable Remotion, install Node.js: "
+            "sudo apt-get install -y nodejs npm"
+        )
         return False
     if not (_REMOTION_DIR / "package.json").exists():
         logger.debug("remotion/package.json missing — skipping Remotion")

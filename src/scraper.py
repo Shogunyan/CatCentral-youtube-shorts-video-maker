@@ -208,6 +208,20 @@ def _is_english(title: str) -> bool:
     return (latin / len(alpha_chars)) >= 0.75
 
 
+_RANKING_WORDS = {
+    "ranked", "ranking", "countdown", "tier", "tierlist", "tier list",
+    "top 5", "top5", "top 10", "top10", "#1", "number 1", "number one",
+    "worst to best", "best to worst", "funniest", "funniest cats",
+}
+
+def _is_ranking_video(title: str) -> bool:
+    """Return True only if the title looks like a ranking/countdown video."""
+    if not title:
+        return False
+    t = title.lower()
+    return any(w in t for w in _RANKING_WORDS)
+
+
 class VideoScraper:
     def __init__(self, config):
         self.config = config
@@ -783,6 +797,8 @@ class VideoScraper:
                 title = e.get("title", "")
                 if not _is_cat_video(title) or not _is_english(title):
                     continue
+                if not _is_ranking_video(title):
+                    continue
                 views = e.get("view_count") or 0
                 if views < min_views:
                     continue
@@ -843,6 +859,10 @@ class VideoScraper:
                 continue
             src_title = src_info.get("title") or ""
             if not _is_cat_video(src_title) or _is_unwanted(src_title) or not _is_english(src_title):
+                continue
+            upload_year = int((src_info.get("upload_date") or "20200101")[:4])
+            if upload_year < 2020:
+                logger.debug(f"      Route 1 skip {src_id}: uploaded {upload_year} (pre-2020)")
                 continue
             duration = src_info.get("duration") or 0
             views    = src_info.get("view_count") or 0
@@ -932,6 +952,9 @@ class VideoScraper:
                                 if (not _is_cat_video(title)
                                         or _is_unwanted(title)
                                         or not _is_english(title)):
+                                    continue
+                                upload_year_r2 = int((e.get("upload_date") or "20200101")[:4])
+                                if upload_year_r2 < 2020:
                                     continue
                                 dur = e.get("duration") or 0
                                 if dur and dur > 90:
@@ -1063,6 +1086,9 @@ class VideoScraper:
                                         or _is_unwanted(title)
                                         or not _is_english(title)):
                                     continue
+                                upload_year_3a = int((e.get("upload_date") or "20200101")[:4])
+                                if upload_year_3a < 2020:
+                                    continue
                                 dur = e.get("duration") or 0
                                 if dur and dur > 90:
                                     continue
@@ -1181,6 +1207,9 @@ class VideoScraper:
                             title = e.get("title", "")
                             if (not _is_cat_video(title) or _is_unwanted(title)
                                     or not _is_english(title)):
+                                continue
+                            upload_year_3b = int((e.get("upload_date") or "20200101")[:4])
+                            if upload_year_3b < 2020:
                                 continue
                             dur = e.get("duration") or 0
                             if dur and dur > 90:
