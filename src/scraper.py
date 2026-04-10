@@ -139,9 +139,15 @@ def _is_unwanted(title: str) -> bool:
         "cat filter", "cat face filter", "zoom filter", "snap filter",
         "snapchat", "cat costume", "cat suit", "dressed as cat",
         "cat mask", "cat ears filter",
-        "ai cat", "ai generated", "ai animation",
+        "ai cat", "ai generated", "ai video", "ai animation", "ai art",
         "animated cat", "cartoon cat", "cgi cat", "3d cat",
         "greenscreen", "green screen",
+        # AI-generated video tools — catches "made with Sora", "Kling AI cat", etc.
+        "made with ai", "made by ai", "created with ai", "ai created",
+        "generated with ai", "ai made",
+        "midjourney", "stable diffusion", "runway ml", "sora ai",
+        "kling ai", "kling video", "pika labs", "gen-2 video",
+        "ai film", "deepfake",
         # Human / political content that often slips through (e.g. Zoom-cat-filter
         # viral congressional hearing clip)
         "congress", "senator", "hearing", "politician", "lawyer",
@@ -654,6 +660,7 @@ class VideoScraper:
                 "  search_query: 4-8 word YouTube search to find the ORIGINAL standalone clip\n"
                 "  is_real_cat: true only if a LIVE REAL cat (not animated, CGI, or Zoom/camera filter)\n"
                 "  is_animated: true if cartoon, animation, or CGI\n"
+                "  is_ai_generated: true if this footage appears to be AI-generated video (e.g. Sora, Kling, Runway, Pika, or any AI video generator) — signs include: unnaturally smooth motion, slightly-off anatomy, dreamlike or fluid background, texture inconsistencies, or if the video style looks AI-rendered even if it tries to look realistic\n"
                 "  is_english: true if any on-screen text is English, or no text is visible\n"
                 "  is_cat_primary_subject: true only if the cat is the MAIN focus and occupies the majority of screen attention (NOT a human editing video software, NOT a reaction clip, NOT the cat barely visible in background)\n"
                 "  is_screen_recording: true if this frame shows video editing software, a desktop screen recording, someone editing audio/video, or any meta-content about video creation\n"
@@ -661,6 +668,7 @@ class VideoScraper:
                 "  confidence: 1-10 confidence in the timestamp accuracy\n\n"
                 "Rules:\n"
                 "- EXCLUDE any clip where is_real_cat is false or is_animated is true\n"
+                "- EXCLUDE any clip where is_ai_generated is true — we ONLY want authentic recorded footage\n"
                 "- EXCLUDE any clip where is_cat_primary_subject is false\n"
                 "- EXCLUDE any clip where is_screen_recording is true\n"
                 "- EXCLUDE clips that appear to be a human using a cat filter (Zoom, Snapchat, etc.)\n"
@@ -698,8 +706,10 @@ class VideoScraper:
             for item in clips_raw:
                 if not isinstance(item, dict):
                     continue
-                # Hard content filter — drop animated, non-real-cat, and meta clips
+                # Hard content filter — drop AI-generated, animated, non-real-cat, and meta clips
                 if item.get("is_animated", False):
+                    continue
+                if item.get("is_ai_generated", False):
                     continue
                 if not item.get("is_real_cat", True):
                     continue
@@ -721,6 +731,7 @@ class VideoScraper:
                     "search_query":           str(item.get("search_query", ""))[:80],
                     "is_real_cat":            bool(item.get("is_real_cat", True)),
                     "is_animated":            bool(item.get("is_animated", False)),
+                    "is_ai_generated":        bool(item.get("is_ai_generated", False)),
                     "is_english":             bool(item.get("is_english", True)),
                     "is_cat_primary_subject": bool(item.get("is_cat_primary_subject", True)),
                     "is_screen_recording":    bool(item.get("is_screen_recording", False)),

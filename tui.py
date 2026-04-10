@@ -99,8 +99,23 @@ class SetupScreen(Screen):
         super().__init__()
         self._as_settings = as_settings  # True when opened from the dashboard
 
+    @staticmethod
+    def _load_env() -> dict[str, str]:
+        """Read the current .env and return a dict of key → value."""
+        from pathlib import Path as _P
+        env_path = _P(__file__).parent / ".env"
+        vals: dict[str, str] = {}
+        if env_path.exists():
+            for line in env_path.read_text().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    vals[k.strip()] = v.strip()
+        return vals
+
     def action_go_back(self) -> None:
-        """Escape / Back — only navigate away if there's a dashboard to return to."""
         if self._as_settings:
             self.app.pop_screen()
 
@@ -109,19 +124,21 @@ class SetupScreen(Screen):
         self.app.pop_screen()
 
     def compose(self) -> ComposeResult:
+        # Pre-load existing values so settings are never blank on re-open
+        env = self._load_env()
+
         yield Header()
         with Container(id="setup-wrap"):
             if self._as_settings:
                 yield Button("← Back to Dashboard", id="btn-back", variant="default")
-            yield Static("🐱  CatCentral — Setup", id="setup-title")
+            yield Static("🐱  CatCentral — Setup / Settings", id="setup-title")
             yield Rule()
 
             yield Static(
-                "Paste your Google OAuth credentials below.  "
-                "They are only stored locally in your .env file.",
+                "Your credentials are stored locally in  .env  — never uploaded anywhere.",
                 classes="instructions",
             )
-            yield Static("How to get them:", classes="help-header")
+            yield Static("How to get Google credentials:", classes="help-header")
             yield Static(
                 "  1.  Go to  console.cloud.google.com", classes="help-step"
             )
@@ -145,12 +162,14 @@ class SetupScreen(Screen):
 
             yield Static("Google Client ID", classes="field-label")
             yield Input(
+                value=env.get("GOOGLE_CLIENT_ID", ""),
                 placeholder="123456789-abc…apps.googleusercontent.com",
                 id="inp-cid",
             )
 
             yield Static("Google Client Secret", classes="field-label")
             yield Input(
+                value=env.get("GOOGLE_CLIENT_SECRET", ""),
                 placeholder="GOCSPX-…",
                 password=True,
                 id="inp-csecret",
@@ -162,15 +181,32 @@ class SetupScreen(Screen):
                 "Upload Schedule  (24 h times, comma-separated)",
                 classes="field-label",
             )
-            yield Input(value="09:00,14:00,19:00", id="inp-times")
+            yield Input(
+                value=env.get("UPLOAD_TIMES", "09:00,14:00,19:00"),
+                id="inp-times",
+            )
+
+            yield Static("Watermark Text", classes="field-label")
+            yield Input(
+                value=env.get("WATERMARK_TEXT", "@CatCentral"),
+                id="inp-watermark",
+            )
+
+            yield Static("Clip Duration (seconds)", classes="field-label")
+            yield Input(
+                value=env.get("CLIP_DURATION", "25"),
+                id="inp-clip-dur",
+            )
 
             yield Static("Instagram Username  (optional)", classes="field-label")
             yield Input(
+                value=env.get("INSTAGRAM_USERNAME", ""),
                 placeholder="leave blank to skip",
                 id="inp-ig-user",
             )
             yield Static("Instagram Password  (optional)", classes="field-label")
             yield Input(
+                value=env.get("INSTAGRAM_PASSWORD", ""),
                 placeholder="leave blank to skip",
                 password=True,
                 id="inp-ig-pass",
@@ -179,17 +215,17 @@ class SetupScreen(Screen):
             yield Rule()
 
             yield Static(
-                "Gemini API Key  (optional — enables AI visual clip detection)",
+                "Gemini API Key  (optional — enables AI visual clip detection + AI video filtering)",
                 classes="field-label",
             )
             yield Static(
-                "  Without this the app works normally.  With it, Gemini Vision\n"
-                "  analyses ranking-video frames to find the exact original source\n"
-                "  clip when description links are missing.\n"
+                "  With this key, Gemini Vision analyses ranking-video frames to\n"
+                "  find the exact original source clip AND blocks AI-generated videos.\n"
                 "  Get a free key at  aistudio.google.com  (same Google account).",
                 classes="help-step",
             )
             yield Input(
+                value=env.get("GEMINI_API_KEY", ""),
                 placeholder="AIza…  (leave blank to skip)",
                 password=True,
                 id="inp-gemini-key",
@@ -197,26 +233,70 @@ class SetupScreen(Screen):
 
             yield Rule()
 
-            yield Button(
-                "▶  Authorize YouTube & Save",
-                id="btn-auth",
-                variant="success",
+            # Two separate action buttons
+            with Horizontal(id="btn-auth-row"):
+                yield Button(
+                    "💾  Save Settings",
+                    id="btn-save-only",
+                    variant="default",
+                )
+                yield Button(
+                    "▶  Save + Re-authorize YouTube",
+                    id="btn-auth",
+                    variant="success",
+                )
+            yield Static(
+                "  Use  Save Settings  to update keys/schedule without re-logging in.\n"
+                "  Use  Save + Re-authorize  only if YouTube auth is broken or expired.",
+                classes="help-step",
             )
             yield Static("", id="setup-status")
 
         yield Footer()
 
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _collect_fields(self) -> dict[str, str]:
+        return {
+            "cid":        self.query_one("#inp-cid", Input).value.strip(),
+            "csecret":    self.query_one("#inp-csecret", Input).value.strip(),
+            "times":      self.query_one("#inp-times", Input).value.strip(),
+            "watermark":  self.query_one("#inp-watermark", Input).value.strip(),
+            "clip_dur":   self.query_one("#inp-clip-dur", Input).value.strip(),
+            "ig_user":    self.query_one("#inp-ig-user", Input).value.strip(),
+            "ig_pass":    self.query_one("#inp-ig-pass", Input).value.strip(),
+            "gemini_key": self.query_one("#inp-gemini-key", Input).value.strip(),
+        }
+
     # ── Handlers ──────────────────────────────────────────────────────────────
+
+    @on(Button.Pressed, "#btn-save-only")
+    def on_save_only(self) -> None:
+        """Save .env without running the OAuth browser flow."""
+        f = self._collect_fields()
+        if not f["cid"] or not f["csecret"]:
+            self._set_status("❌  Client ID and Client Secret are required.", error=True)
+            return
+        try:
+            from setup_wizard import _write_env
+            _write_env(
+                client_id=f["cid"],
+                client_secret=f["csecret"],
+                upload_times=f["times"] or "09:00,14:00,19:00",
+                instagram_username=f["ig_user"],
+                instagram_password=f["ig_pass"],
+                gemini_api_key=f["gemini_key"],
+                watermark_text=f["watermark"],
+                clip_duration=f["clip_dur"],
+            )
+            self._set_status("✅  Settings saved!  Changes take effect on next run.")
+        except Exception as e:
+            self._set_status(f"❌  Save failed: {e}", error=True)
 
     @on(Button.Pressed, "#btn-auth")
     def on_authorize(self) -> None:
-        cid = self.query_one("#inp-cid", Input).value.strip()
-        csecret = self.query_one("#inp-csecret", Input).value.strip()
-        times = self.query_one("#inp-times", Input).value.strip()
-        ig_user = self.query_one("#inp-ig-user", Input).value.strip()
-        ig_pass = self.query_one("#inp-ig-pass", Input).value.strip()
-        gemini_key = self.query_one("#inp-gemini-key", Input).value.strip()
-
+        f = self._collect_fields()
+        cid, csecret = f["cid"], f["csecret"]
         if not cid or not csecret:
             self._set_status("❌  Client ID and Client Secret are required.", error=True)
             return
@@ -225,7 +305,10 @@ class SetupScreen(Screen):
         btn.disabled = True
         btn.label = "⏳  Browser opening for authorization…"
         self._set_status("🌐  A browser window will open — log in and click Allow.")
-        self._do_auth(cid, csecret, times, ig_user, ig_pass, gemini_key)
+        self._do_auth(
+            cid, csecret, f["times"], f["ig_user"], f["ig_pass"], f["gemini_key"],
+            f["watermark"], f["clip_dur"],
+        )
 
     @work(thread=True)
     def _do_auth(
@@ -235,6 +318,8 @@ class SetupScreen(Screen):
         ig_user: str = "",
         ig_pass: str = "",
         gemini_key: str = "",
+        watermark_text: str = "",
+        clip_duration: str = "",
     ) -> None:
         import threading
         import time
@@ -308,6 +393,8 @@ class SetupScreen(Screen):
                 instagram_username=ig_user,
                 instagram_password=ig_pass,
                 gemini_api_key=gemini_key,
+                watermark_text=watermark_text,
+                clip_duration=clip_duration,
             )
             from config import Config
             from src.uploader import YouTubeUploader
@@ -689,9 +776,21 @@ Button#btn-back {
     border: tall #30363d;
 }
 
-Button#btn-auth {
-    width: 100%;
+#btn-auth-row {
+    height: 3;
     margin: 1 0 0 0;
+    align: left middle;
+}
+
+Button#btn-save-only {
+    margin: 0 1 0 0;
+    background: #21262d;
+    color: #e6edf3;
+    border: tall #30363d;
+}
+
+Button#btn-auth {
+    margin: 0;
 }
 
 /* ── Dashboard ───────────────────────────────────────────────────────── */
