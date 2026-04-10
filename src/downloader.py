@@ -20,6 +20,33 @@ _EBU_RE = re.compile(r't:\s+([\d.]+)\s+M:\s+([-\d.]+)')
 
 logger = logging.getLogger(__name__)
 
+
+def _gemini_generate(api_key: str, model_name: str, parts: list) -> str:
+    """Call Gemini with mixed text/image parts. Supports google.genai (new) and legacy."""
+    try:
+        from google import genai
+        from google.genai import types
+        client = genai.Client(api_key=api_key)
+        new_parts = []
+        for p in parts:
+            if isinstance(p, str):
+                new_parts.append(types.Part.from_text(text=p))
+            elif isinstance(p, dict) and "data" in p:
+                new_parts.append(types.Part.from_bytes(
+                    data=p["data"], mime_type=p.get("mime_type", "image/jpeg"),
+                ))
+            else:
+                new_parts.append(p)
+        resp = client.models.generate_content(model=model_name, contents=new_parts)
+        return resp.text
+    except ImportError:
+        import google.generativeai as genai  # type: ignore[no-redef]
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(model_name)
+        resp = model.generate_content(parts)
+        return resp.text
+
+
 # Minimum acceptable clip duration in seconds
 MIN_DURATION = 4
 
@@ -102,7 +129,9 @@ class Downloader:
             downloaded = self._find_existing(vid_id)
             if downloaded:
                 h = _probe_height(downloaded)
-                if h and h < MIN_CLIP_HEIGHT:
+                # Only apply height filter to standalone clips — ranking slices
+                # come from proven 1M+ view Shorts and are always usable.
+                if h and h < MIN_CLIP_HEIGHT and platform != "ranking_slice":
                     logger.warning(
                         f"Clip too low-res ({h}p < {MIN_CLIP_HEIGHT}p), skipping {vid_id}"
                     )
@@ -169,7 +198,9 @@ class Downloader:
                     self._cleanup(vid_id)
                     return None
                 h = _probe_height(downloaded)
-                if h and h < MIN_CLIP_HEIGHT:
+                # Skip height filter for ranking slices — they come from
+                # proven 1M+ view Shorts, quality is always acceptable.
+                if h and h < MIN_CLIP_HEIGHT and platform != "ranking_slice":
                     logger.warning(
                         f"Segment too low-res ({h}p < {MIN_CLIP_HEIGHT}p), skipping {vid_id}"
                     )
@@ -280,10 +311,6 @@ class Downloader:
         """
         try:
             import json as _json
-            import google.generativeai as genai
-
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel("gemini-2.0-flash")
 
             target   = getattr(self.config, "clip_duration", 25)
             n_frames = min(8, max(3, int(duration / 5)))
@@ -319,8 +346,7 @@ class Downloader:
                 prompt_parts.append(f"\n[Frame at {ts:.1f}s]:")
                 prompt_parts.append({"mime_type": "image/jpeg", "data": fb})
 
-            response = model.generate_content(prompt_parts)
-            raw      = response.text.strip()
+            raw = _gemini_generate(api_key, "gemini-2.0-flash", prompt_parts).strip()
             # Strip markdown fences and find the first JSON object
             raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.MULTILINE)
             raw = re.sub(r"\s*```\s*$",        "", raw, flags=re.MULTILINE)

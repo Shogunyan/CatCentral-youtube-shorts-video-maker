@@ -17,5 +17,5 @@ colorama>=0.4.6
 
 # AI visual analysis — optional, activates frame-based source-clip detection
 # Set GEMINI_API_KEY in .env to enable (free at aistudio.google.com).
-# Works perfectly fine without it — just uses text search as fallback.
-google-generativeai>=0.8.0
+# Works perfectly fine without it — just uses chapter/even slicing as fallback.
+google-genai>=1.0.0

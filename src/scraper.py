@@ -32,6 +32,44 @@ from .viral_db import ViralClipDB
 
 logger = logging.getLogger(__name__)
 
+
+# ── Gemini API compatibility layer ───────────────────────────────────────────
+# Supports both the new google-genai (1.x) and the legacy google-generativeai.
+
+def _gemini_generate(api_key: str, model_name: str, parts: list) -> str:
+    """
+    Call Gemini with a list of mixed text/image parts.
+
+    `parts` is a list where each element is either:
+      - a str  (text)
+      - a dict with keys "mime_type" and "data" (image bytes)
+
+    Returns the model's response text.
+    """
+    try:
+        from google import genai
+        from google.genai import types
+        client = genai.Client(api_key=api_key)
+        new_parts = []
+        for p in parts:
+            if isinstance(p, str):
+                new_parts.append(types.Part.from_text(text=p))
+            elif isinstance(p, dict) and "data" in p:
+                new_parts.append(types.Part.from_bytes(
+                    data=p["data"], mime_type=p.get("mime_type", "image/jpeg"),
+                ))
+            else:
+                new_parts.append(p)
+        resp = client.models.generate_content(model=model_name, contents=new_parts)
+        return resp.text
+    except ImportError:
+        import google.generativeai as genai  # type: ignore[no-redef]
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(model_name)
+        resp = model.generate_content(parts)
+        return resp.text
+
+
 # ── Comment timestamp parsing ─────────────────────────────────────────────────
 # Matches timestamps like 0:45, 1:23, 12:34, 1:23:45 in comment text
 _TS_RE = re.compile(r'\b(\d{1,2}):(\d{2})(?::(\d{2}))?\b')
@@ -168,6 +206,23 @@ def _is_unwanted(title: str) -> bool:
         "compilation", "best of", "top moments", "funny moments",
         # Generic non-cat
         "dog", "hamster", "rabbit", "bird", "parrot",
+        # Animated / cartoon content (broader catch)
+        "animated", "animation", "cartoon", "anime", "pixar",
+        "disney", "dreamworks", "cgi", "3d render",
+        "vtuber", "virtual", "gacha", "roblox", "minecraft",
+        "game", "gameplay", "gaming", "fortnite",
+        # Profanity / inappropriate / NSFW
+        "nsfw", "nude", "naked", "sex", "porn", "xxx",
+        "onlyfans", "thot", "twerk", "stripper",
+        "shit", "fuck", "bitch", "ass ", "damn",
+        "poop", "pee ", "toilet", "litter box prank",
+        "diarrhea", "vomit", "puke", "gross out",
+        "gore", "blood", "dead cat", "animal abuse",
+        "cruelty", "hurt", "injured", "abuse",
+        # Non-cat content that slips through
+        "parking ticket", "standup", "stand up", "comedian",
+        "podcast", "interview", "news", "politics",
+        "cooking", "recipe", "mukbang", "asmr eating",
     ]
     return any(kw in t for kw in BLOCK)
 
@@ -213,12 +268,29 @@ _RANKING_WORDS = {
     "worst to best", "best to worst", "funniest", "funniest cats",
 }
 
+# Words that disqualify a ranking video even if it mentions cats.
+# We only want PURE cat ranking videos — no mixed-animal content.
+_RANKING_REJECT = {
+    "dog", "dogs", "puppy", "puppies", "pup ",
+    "hamster", "rabbit", "bird", "parrot", "horse",
+    "monkey", "animal", "animals", "pet ", "pets ",
+    "people", "human", "man ", "woman ", "kid ", "baby ",
+    "parking", "ticket", "story", "comedy", "standup",
+    "stand up", "comedian", "podcast", "interview",
+}
+
+
 def _is_ranking_video(title: str) -> bool:
-    """Return True only if the title looks like a ranking/countdown video."""
+    """Return True only if the title is a CAT-ONLY ranking/countdown video."""
     if not title:
         return False
     t = title.lower()
-    return any(w in t for w in _RANKING_WORDS)
+    if not any(w in t for w in _RANKING_WORDS):
+        return False
+    # Reject mixed-animal or non-cat ranking videos
+    if any(w in t for w in _RANKING_REJECT):
+        return False
+    return True
 
 
 class VideoScraper:
@@ -549,15 +621,10 @@ class VideoScraper:
         Free tier: 1 500 req/day at aistudio.google.com.
         """
         try:
-            import google.generativeai as genai
-
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel("gemini-2.0-flash")
-
             with open(frame_path, "rb") as f:
                 img_bytes = f.read()
 
-            response = model.generate_content([
+            text = _gemini_generate(api_key, "gemini-2.0-flash", [
                 {"mime_type": "image/jpeg", "data": img_bytes},
                 (
                     "This is a frame from a viral funny cat video. "
@@ -567,7 +634,7 @@ class VideoScraper:
                     "'cat yells at owner'. Reply with just the phrase, nothing else."
                 ),
             ])
-            description = response.text.strip().lower()
+            description = text.strip().lower()
             logger.info(f"  Gemini Vision: '{description}'")
             return description
         except Exception as e:
@@ -633,10 +700,6 @@ class VideoScraper:
         """
         try:
             import json as _json
-            import google.generativeai as genai
-
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel("gemini-2.0-flash")
 
             n_frames = min(10, max(4, int(rv_duration / 8)))
             logger.info(
@@ -699,8 +762,7 @@ class VideoScraper:
                 prompt_parts.append(f"\n[Frame at {ts:.1f}s]:")
                 prompt_parts.append({"mime_type": "image/jpeg", "data": frame_bytes})
 
-            response = model.generate_content(prompt_parts)
-            raw = response.text.strip()
+            raw = _gemini_generate(api_key, "gemini-2.0-flash", prompt_parts).strip()
             # Strip markdown fences then find the first JSON array — Gemini
             # sometimes prefixes the array with a sentence of prose.
             raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.MULTILINE)
@@ -959,6 +1021,9 @@ class VideoScraper:
                     continue
                 seen_ids.add(clip_id)
                 label = re.sub(r'^#?\d+[\.\-:\s]+', '', ch.get("title") or "").strip()
+                # Skip chapter titles that are clearly non-cat content
+                if label and _is_unwanted(label):
+                    continue
                 clips.append({
                     "id":              clip_id,
                     "url":             rv["url"],

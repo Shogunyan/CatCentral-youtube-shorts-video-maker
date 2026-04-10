@@ -123,10 +123,15 @@ class Pipeline:
                     f"✓ Clip {len(downloaded)}/{n} saved  ({kb} KB)",
                 )
 
-        if len(downloaded) < n:
+        # Accept 3+ clips — don't hard-fail when a couple downloads fail.
+        # Videos still look great with 3 or 4 clips; 5 is ideal but not required.
+        min_clips = max(3, n - 2)
+        if len(downloaded) < min_clips:
             self._report(18, "❌  Not enough clips downloaded",
-                         f"Got {len(downloaded)}/{n} — need exactly {n}, aborting")
+                         f"Got {len(downloaded)}/{n} — need at least {min_clips}, aborting")
             return False
+        if len(downloaded) < n:
+            logger.info(f"Proceeding with {len(downloaded)}/{n} clips (minimum is {min_clips})")
 
         downloaded = downloaded[:n]
         random.shuffle(downloaded)
