@@ -599,13 +599,14 @@ def _ensure_remotion(on_progress=None) -> bool:
     if not (_REMOTION_DIR / "package.json").exists():
         logger.debug("remotion/package.json missing — skipping Remotion")
         return False
-    if not (_REMOTION_DIR / "node_modules" / "remotion").exists():
+    remotion_bin = _REMOTION_DIR / "node_modules" / ".bin" / "remotion"
+    if not remotion_bin.exists():
         logger.info("Installing Remotion packages (first run — ~60 s)…")
         if on_progress:
             on_progress("Installing Remotion (first run, ~60 s)…")
         try:
             r = subprocess.run(
-                ["npm", "install", "--prefer-offline"],
+                ["npm", "install"],
                 cwd=_REMOTION_DIR,
                 capture_output=True,
                 text=True,
@@ -618,6 +619,9 @@ def _ensure_remotion(on_progress=None) -> bool:
         except Exception as exc:
             logger.warning(f"npm install error: {exc}")
             return False
+    if not remotion_bin.exists():
+        logger.warning("Remotion binary not found after npm install")
+        return False
     return True
 
 
@@ -700,8 +704,9 @@ def _render_with_remotion(
             on_progress("Rendering with Remotion (animated overlay)…")
         logger.info(f"Remotion render: {n} clips × {config.clip_duration}s")
 
+        remotion_bin = _REMOTION_DIR / "node_modules" / ".bin" / "remotion"
         cmd = [
-            "npx", "--yes", "remotion", "render",
+            str(remotion_bin), "render",
             "src/index.tsx",
             "CatRanking",
             str(output_path.resolve()),
@@ -721,10 +726,15 @@ def _render_with_remotion(
         )
 
         if result.returncode != 0:
-            logger.warning(
-                f"Remotion render failed (rc={result.returncode})"
-                f"\n{result.stderr[-1500:]}"
-            )
+            err = (result.stderr or result.stdout or "")[-1000:].strip()
+            logger.warning(f"Remotion render failed (rc={result.returncode})\n{err}")
+            if on_progress:
+                # Surface first meaningful error line to the TUI log
+                first_err = next(
+                    (l.strip() for l in err.splitlines() if l.strip() and not l.startswith("[")),
+                    err[:120],
+                )
+                on_progress(f"Remotion failed: {first_err} — falling back to ffmpeg")
             return None
 
         if output_path.exists() and output_path.stat().st_size > 50_000:
