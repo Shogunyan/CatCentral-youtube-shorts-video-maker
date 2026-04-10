@@ -153,6 +153,20 @@ def _has_audio(video_path: Path) -> bool:
     return result.stdout.strip() == "audio"
 
 
+def _probe_duration(path: Path) -> float:
+    """Return the duration of a video file in seconds, or 0.0 on failure."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error",
+             "-show_entries", "format=duration",
+             "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=10,
+        )
+        return float(r.stdout.strip())
+    except Exception:
+        return 0.0
+
+
 def _add_woosh_to_clip(
     video_path: Path,
     woosh_path: Path,
@@ -734,21 +748,32 @@ def _render_with_remotion(
     props_file = _REMOTION_DIR / f"_props_{session_id}.json"
 
     try:
-        # Symlink source clips into public/clips/{session_id}/
-        clip_refs = []
-        scores = viral_scores or [0] * n
+        # Copy source clips into public/clips/{session_id}/ and probe durations.
+        # Remotion bundles public/ into a temp webpack dir and does NOT follow
+        # symlinks, so we must copy rather than symlink.
+        clip_refs  = []
+        scores     = viral_scores or [0] * n
+        total_frames_actual = 0
+
         for i, (path, label) in enumerate(zip(clip_paths, labels)):
             dest_name = f"clip_{i}.mp4"
             dest      = clips_public / dest_name
-            # Always copy — Remotion bundles public/ into a temp webpack dir
-            # and does NOT follow symlinks, so symlinks would produce 404s.
             shutil.copy2(path, dest)
+
+            # Use the actual clip duration so Remotion never shows black frames
+            # at the end of a clip that is shorter than clip_duration.
+            actual_dur = _probe_duration(dest)
+            if actual_dur and actual_dur > 0:
+                dur_frames = min(int(round(actual_dur * fps)), clip_dur_frames)
+            else:
+                dur_frames = clip_dur_frames
+            total_frames_actual += dur_frames
 
             clip_refs.append({
                 "path":           f"{session_id}/{dest_name}",
                 "rank":           n - i,
                 "label":          _make_short_label(label),
-                "durationFrames": clip_dur_frames,
+                "durationFrames": dur_frames,
                 "viralScore":     scores[i] if i < len(scores) else 0,
             })
 
@@ -759,7 +784,7 @@ def _render_with_remotion(
             "clips":        clip_refs,
             "title":        title,
             "watermark":    getattr(config, "watermark_text", "@CatCentral"),
-            "totalFrames":  clip_dur_frames * n,
+            "totalFrames":  total_frames_actual,
             "hasWoosh":     has_woosh,
             "hasCountdown": has_countdown,
         }
@@ -767,9 +792,13 @@ def _render_with_remotion(
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
+        total_secs = total_frames_actual / fps
         if on_progress:
-            on_progress("Rendering with Remotion (animated overlay)…")
-        logger.info(f"Remotion render: {n} clips × {config.clip_duration}s")
+            on_progress(f"Rendering with Remotion ({total_secs:.0f}s video)…")
+        logger.info(
+            f"Remotion render: {n} clips, {total_frames_actual} frames "
+            f"({total_secs:.0f}s), concurrency=8"
+        )
 
         remotion_bin = _REMOTION_DIR / "node_modules" / ".bin" / "remotion"
         cmd = [
@@ -780,11 +809,11 @@ def _render_with_remotion(
             f"--props={props_file.resolve()}",
             "--codec=h264",
             "--crf=18",
-            "--log=error",
+            "--log=verbose",   # verbose so we can diagnose failures
             "--overwrite",
-            "--concurrency=4",
-            # swangle = software WebGL renderer — works without a GPU/display,
-            # required in containers, CI, and headless Linux servers.
+            "--concurrency=8",  # 8 parallel Chrome tabs — roughly 2× faster than 4
+            # swangle = software WebGL (Mesa/ANGLE) — works on headless Linux servers
+            # without a GPU or display server. Safe but slower than hardware EGL.
             "--gl=swangle",
         ]
 
@@ -793,44 +822,54 @@ def _render_with_remotion(
         browser_exe = _find_headless_browser()
         if browser_exe:
             cmd.append(f"--browser-executable={browser_exe}")
-            logger.debug(f"Remotion using browser: {browser_exe}")
+            logger.info(f"Remotion using browser: {browser_exe}")
         else:
-            # _ensure_remotion already checked this, but be safe
-            logger.warning("No headless browser available — aborting Remotion render")
+            logger.error(
+                "No headless browser found for Remotion. "
+                "Run: npx playwright install chromium  OR  "
+                "sudo apt-get install -y chromium"
+            )
             return None
 
+        logger.info(f"Remotion command: {' '.join(cmd[:6])} …")
         result = subprocess.run(
             cmd,
             cwd=_REMOTION_DIR,
             capture_output=True,
             text=True,
-            timeout=600,
+            timeout=1800,   # 30 min — generous for slow swangle renders
         )
 
+        # Always log the last 2 KB of output for post-mortem diagnostics
+        combined = ((result.stderr or "") + (result.stdout or "")).strip()
+        if combined:
+            logger.debug(f"Remotion output (last 2KB):\n{combined[-2000:]}")
+
         if result.returncode != 0:
-            err = (result.stderr or result.stdout or "")[-1000:].strip()
-            logger.warning(f"Remotion render failed (rc={result.returncode})\n{err}")
+            err = combined[-1200:].strip()
+            logger.error(f"Remotion render failed (rc={result.returncode})\n{err}")
             if on_progress:
-                # Surface first meaningful error line to the TUI log
                 first_err = next(
                     (l.strip() for l in err.splitlines() if l.strip() and not l.startswith("[")),
-                    err[:120],
+                    err[:160],
                 )
-                on_progress(f"Remotion failed: {first_err} — falling back to ffmpeg")
+                on_progress(f"Remotion error: {first_err}")
             return None
 
         if output_path.exists() and output_path.stat().st_size > 50_000:
             logger.info(f"Remotion render complete → {output_path}")
             return output_path
 
-        logger.warning("Remotion output missing or too small")
+        logger.error(
+            f"Remotion returned rc=0 but output is missing or empty: {output_path}"
+        )
         return None
 
     except subprocess.TimeoutExpired:
-        logger.warning("Remotion render timed out (>10 min)")
+        logger.error("Remotion render timed out (>30 min) — consider reducing clip count")
         return None
     except Exception as exc:
-        logger.warning(f"Remotion render error: {exc}")
+        logger.error(f"Remotion render error: {exc}", exc_info=True)
         return None
     finally:
         props_file.unlink(missing_ok=True)
@@ -850,10 +889,13 @@ def create_ranking_video(
     viral_scores: list[int] | None = None,
 ) -> Path:
     """
-    Build a ranking-style Shorts video from cat clips.
+    Build a ranking-style Shorts video from cat clips using Remotion.
 
-    Tries Remotion (React + headless Chrome, animated overlays) first.
-    Falls back to the plain ffmpeg pipeline if Remotion is unavailable.
+    Remotion renders an animated React overlay (rank numbers, title bar,
+    viral badge, countdown, watermark) over the source clips.
+
+    Raises RuntimeError if Remotion is unavailable or the render fails —
+    fix the Remotion setup rather than falling back silently to a plain render.
     """
     if len(clip_paths) < 2:
         raise ValueError(f"Need at least 2 clips, got {len(clip_paths)}")
@@ -867,10 +909,7 @@ def create_ranking_video(
         if on_progress:
             on_progress(msg)
 
-    clip_duration = config.clip_duration
-
     # ── Pre-blur clips that carry a burned-in overlay (ranking_slice, TikTok…) ─
-    # Both the Remotion and ffmpeg paths need clean source files.
     with tempfile.TemporaryDirectory(prefix="catcentral_preblur_") as blurtmp:
         btmp  = Path(blurtmp)
         ready: list[Path] = []
@@ -884,69 +923,26 @@ def create_ranking_video(
             else:
                 ready.append(src)
 
-        # ── 1. Try Remotion (animated React overlay) ────────────────────────
         out = _render_with_remotion(
             ready, title, output_path, config, labels,
             viral_scores=viral_scores, on_progress=on_progress,
         )
-        if out:
-            logger.info(f"Ranking video created (Remotion): {output_path}")
-            return out
 
-    # ── 2. FFmpeg fallback ─────────────────────────────────────────────────────
-    _step("Using ffmpeg renderer…")
-    with tempfile.TemporaryDirectory(prefix="catcentral_") as tmpdir:
-        tmp = Path(tmpdir)
-        processed: list[Path] = []
+    if out:
+        logger.info(f"Ranking video created (Remotion): {output_path}")
+        return out
 
-        woosh = _get_woosh()
-        if woosh:
-            _step("Woosh SFX ready…")
-
-        for idx, src in enumerate(clip_paths):
-            rank     = n - idx
-            step1    = tmp / f"rank{rank}.mp4"
-            platform = platforms[idx]
-
-            blur_regions = _PLATFORM_BLUR_REGIONS.get(
-                platform, _PLATFORM_BLUR_REGIONS["unknown"]
-            )
-            if blur_regions:
-                _step(f"Removing {platform} watermark — clip {idx + 1}/{n}…")
-                blurred = tmp / f"blur_rank{rank}.mp4"
-                _blur_source_watermarks(src, blurred, platform)
-                source = blurred
-            else:
-                source = src
-
-            _step(f"Processing clip {idx + 1}/{n}  (rank #{rank})…")
-            _process_clip(
-                source, step1, rank, clip_duration, title,
-                all_labels=labels,
-                current_idx=idx,
-                n=n,
-            )
-
-            if woosh:
-                woosh_out = tmp / f"woosh_rank{rank}.mp4"
-                try:
-                    _add_woosh_to_clip(step1, woosh, woosh_out)
-                    processed.append(woosh_out)
-                except Exception as e:
-                    logger.warning(f"Woosh mix failed for rank {rank}: {e}")
-                    processed.append(step1)
-            else:
-                processed.append(step1)
-
-        _step("Concatenating all clips…")
-        joined = tmp / "joined.mp4"
-        _concat_clips(processed, joined)
-
-        _step(f"Adding {config.watermark_text} watermark…")
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        _add_watermark(joined, output_path, config.watermark_text)
-
-    logger.info(f"Ranking video created (ffmpeg): {output_path}")
+    # Remotion failed — surface a clear error so the user can fix the setup.
+    raise RuntimeError(
+        "Remotion render failed — video not created.\n"
+        "Checklist:\n"
+        "  1. Node.js installed?       node --version\n"
+        "  2. npm packages installed?  cd remotion && npm install\n"
+        "  3. Headless browser found?  check REMOTION_CHROME_EXECUTABLE env var\n"
+        "     or run: npx playwright install chromium\n"
+        "  4. Check the log file for the full Remotion error output.\n"
+        "Tip: set LOG_LEVEL=DEBUG in .env for verbose Remotion logs."
+    )
     return output_path
 
 

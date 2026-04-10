@@ -219,6 +219,11 @@ def _is_unwanted(title: str) -> bool:
         "diarrhea", "vomit", "puke", "gross out",
         "gore", "blood", "dead cat", "animal abuse",
         "cruelty", "hurt", "injured", "abuse",
+        # Gross / fetish / weird bodily-function content ("Foody fartsy" etc.)
+        "fart", "farts", "farting", "farty", "fartsy",
+        "fetish", "weird fetish", "gross", "disgusting",
+        "burp", "belch", "scat", "piss",
+        "yiff", "furry nsfw",
         # Non-cat content that slips through
         "parking ticket", "standup", "stand up", "comedian",
         "podcast", "interview", "news", "politics",
@@ -1050,10 +1055,13 @@ class VideoScraper:
                 if self._is_used(clip_id) or clip_id in seen_ids:
                     continue
                 seen_ids.add(clip_id)
+                # Give each segment a unique positional label so the rank
+                # sidebar shows "SCENE 1", "SCENE 2", … instead of every clip
+                # showing the identical compilation title.
                 clips.append({
                     "id":              clip_id,
                     "url":             rv["url"],
-                    "title":           rv["title"][:40],
+                    "title":           f"scene {i + 1}",
                     "start_time":      start,
                     "end_time":        end,
                     "platform":        "ranking_slice",
