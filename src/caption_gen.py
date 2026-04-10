@@ -1,33 +1,26 @@
 """
 caption_gen.py — Generates YouTube titles, descriptions, and tag lists.
-
-Each title theme has associated search terms so the scraper can find clips
-that actually match what the title says.
 """
 import random
 
 # ── Title themes ─────────────────────────────────────────────────────────────
-# Each theme: (title_template, [youtube_queries], [tiktok_hashtags])
-# The scraper uses these to find clips that match the title.
-
-_GENERIC_QUERIES = ["cat ranking", "funny cats ranked", "cat ranking shorts"]
 
 THEMES = [
-    {"title": "Top 5 Funniest Cats 😂",              "yt_queries": _GENERIC_QUERIES, "tt_hashtags": ["funnycat", "top5cats", "funnycats"]},
-    {"title": "Cats Ranked 5 to 1 🏆",               "yt_queries": _GENERIC_QUERIES, "tt_hashtags": ["catranking", "catsranked", "funnycats"]},
-    {"title": "Most Viral Cat Moments 🔥",            "yt_queries": _GENERIC_QUERIES, "tt_hashtags": ["viralcat", "catmoments", "funnycats"]},
-    {"title": "5 Cats That Broke The Internet 😱",    "yt_queries": _GENERIC_QUERIES, "tt_hashtags": ["viralcat", "catinternet", "funnycats"]},
-    {"title": "Funniest Cat Clips Ranked 🐱",         "yt_queries": _GENERIC_QUERIES, "tt_hashtags": ["funnycat", "catclips", "catsranked"]},
-    {"title": "Which Cat Is Funniest? 👀",            "yt_queries": _GENERIC_QUERIES, "tt_hashtags": ["funnycat", "catpoll", "funnycats"]},
-    {"title": "Unhinged Cats Ranked 😭",              "yt_queries": _GENERIC_QUERIES, "tt_hashtags": ["unhingedcat", "chaoticcat", "crazycats"]},
-    {"title": "Wild Cat Moments 🐾",                  "yt_queries": _GENERIC_QUERIES, "tt_hashtags": ["crazycats", "wildcat", "catmoment"]},
-    {"title": "Cats Caught Being Chaotic 💀",         "yt_queries": _GENERIC_QUERIES, "tt_hashtags": ["chaoticcat", "catchaos", "funnycats"]},
-    {"title": "Top 5 Cat Reactions 😹",               "yt_queries": _GENERIC_QUERIES, "tt_hashtags": ["catreaction", "funnycat", "catsoftiktok"]},
-    {"title": "Cats Being Weird 😂",                  "yt_queries": _GENERIC_QUERIES, "tt_hashtags": ["weirdcat", "catsbeingweird", "funnycats"]},
-    {"title": "Funniest Cats On The Internet 🌐",     "yt_queries": _GENERIC_QUERIES, "tt_hashtags": ["funnycat", "internetcat", "funnycats"]},
-    {"title": "Cats Are Built Different 😤",          "yt_queries": _GENERIC_QUERIES, "tt_hashtags": ["catsdifferent", "funnycat", "crazycats"]},
-    {"title": "Cats That Went Viral 🔥",              "yt_queries": _GENERIC_QUERIES, "tt_hashtags": ["viralcat", "famouscat", "funnycats"]},
-    {"title": "Top Cat Moments You Need To See 👁️",  "yt_queries": _GENERIC_QUERIES, "tt_hashtags": ["topcat", "catmoments", "funnycats"]},
+    {"title": "Top 5 Funniest Cats 😂",              "tt_hashtags": ["funnycat", "top5cats", "funnycats"]},
+    {"title": "Cats Ranked 5 to 1 🏆",               "tt_hashtags": ["catranking", "catsranked", "funnycats"]},
+    {"title": "Most Viral Cat Moments 🔥",            "tt_hashtags": ["viralcat", "catmoments", "funnycats"]},
+    {"title": "5 Cats That Broke The Internet 😱",    "tt_hashtags": ["viralcat", "catinternet", "funnycats"]},
+    {"title": "Funniest Cat Clips Ranked 🐱",         "tt_hashtags": ["funnycat", "catclips", "catsranked"]},
+    {"title": "Which Cat Is Funniest? 👀",            "tt_hashtags": ["funnycat", "catpoll", "funnycats"]},
+    {"title": "Unhinged Cats Ranked 😭",              "tt_hashtags": ["unhingedcat", "chaoticcat", "crazycats"]},
+    {"title": "Wild Cat Moments 🐾",                  "tt_hashtags": ["crazycats", "wildcat", "catmoment"]},
+    {"title": "Cats Caught Being Chaotic 💀",         "tt_hashtags": ["chaoticcat", "catchaos", "funnycats"]},
+    {"title": "Top 5 Cat Reactions 😹",               "tt_hashtags": ["catreaction", "funnycat", "catsoftiktok"]},
+    {"title": "Cats Being Weird 😂",                  "tt_hashtags": ["weirdcat", "catsbeingweird", "funnycats"]},
+    {"title": "Funniest Cats On The Internet 🌐",     "tt_hashtags": ["funnycat", "internetcat", "funnycats"]},
+    {"title": "Cats Are Built Different 😤",          "tt_hashtags": ["catsdifferent", "funnycat", "crazycats"]},
+    {"title": "Cats That Went Viral 🔥",              "tt_hashtags": ["viralcat", "famouscat", "funnycats"]},
+    {"title": "Top Cat Moments You Need To See 👁️",  "tt_hashtags": ["topcat", "catmoments", "funnycats"]},
 ]
 
 # ── Description templates ─────────────────────────────────────────────────────
@@ -181,13 +174,11 @@ _HASHTAG_POOL = [
 def pick_theme(n: int = 5) -> dict:
     """Pick a random theme and return it with the formatted title."""
     theme = random.choice(THEMES)
-    # title is the clean display/YouTube title — no #shorts suffix (added in description/tags)
     title = theme["title"].format(n=n)
     if len(title) > 85:
         title = title[:82] + "..."
     return {
         "title": title,
-        "yt_queries": theme["yt_queries"],
         "tt_hashtags": theme["tt_hashtags"],
     }
 
@@ -245,10 +236,7 @@ def generate_tags(extra: list[str] | None = None) -> list[str]:
 
 
 def generate_caption(n: int = 5) -> dict:
-    """
-    Return a dict with title, description, tags, and search terms
-    so the scraper can find matching clips.
-    """
+    """Return a dict with title, description, and tags for a ranking video."""
     theme = pick_theme(n)
     return {
         "title": theme["title"],
@@ -256,6 +244,4 @@ def generate_caption(n: int = 5) -> dict:
             theme["title"], extra_hashtags=theme["tt_hashtags"]
         ),
         "tags": generate_tags(theme["tt_hashtags"]),
-        "yt_queries": theme["yt_queries"],
-        "tt_hashtags": theme["tt_hashtags"],
     }

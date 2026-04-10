@@ -188,26 +188,6 @@ class Downloader:
             self._cleanup(vid_id)
             return None
 
-    def download_batch(self, videos: list[dict], target: int) -> list[tuple[dict, Path]]:
-        """
-        Download from `videos` list until we have `target` successful clips.
-        After each download, trim long clips to the detected peak action moment.
-        Returns list of (video_meta, local_path) tuples.
-        """
-        results: list[tuple[dict, Path]] = []
-        for video in videos:
-            if len(results) >= target:
-                break
-            path = self.download(video)
-            if path:
-                self._trim_to_action(path)
-                results.append((video, path))
-        if len(results) < target:
-            logger.warning(
-                f"Only got {len(results)}/{target} clips after trying {len(videos)} candidates"
-            )
-        return results
-
     # ── Action-moment detection ────────────────────────────────────────────────
 
     def _probe_duration(self, path: Path) -> float:

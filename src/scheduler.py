@@ -15,7 +15,6 @@ so the TUI (or any other caller) can display live updates.
 """
 import logging
 import random
-import shutil
 import signal
 import sys
 import time

@@ -1247,14 +1247,9 @@ class VideoScraper:
 
     # ── Main public API ───────────────────────────────────────────────────────
 
-    def get_candidates(
-        self,
-        want: int = 25,
-        yt_queries: list[str] | None = None,
-        tt_hashtags: list[str] | None = None,
-    ) -> list[dict]:
+    def get_candidates(self, want: int = 25) -> list[dict]:
         """
-        Return exactly `want` clip candidates sourced from proven viral
+        Return up to `want` clip candidates sourced from proven viral
         cat ranking Shorts (1M+ views).
 
         Strategy:
@@ -1264,7 +1259,7 @@ class VideoScraper:
           3. Take CLIPS_FROM_FIRST_RANKING from the #1 ranking video and
              CLIPS_FROM_SECOND_RANKING from the #2 ranking video.
           4. Fill any remaining slots from cross-referenced clips, then
-             reusable clips, then (last resort) lower-view-count rankings.
+             reusable clips.
         """
         def _dedup(videos: list[dict]) -> list[dict]:
             seen: set[str] = set()

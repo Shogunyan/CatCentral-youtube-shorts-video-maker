@@ -754,7 +754,6 @@ def create_ranking_video(
     config,
     clip_platforms: list[str] | None = None,
     on_progress=None,
-    tts_audio: dict | None = None,   # kept for API compat — ignored
     clip_labels: list[str] | None = None,
     viral_scores: list[int] | None = None,
 ) -> Path:
