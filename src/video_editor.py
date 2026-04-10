@@ -13,6 +13,7 @@ Format (matching viral cat ranking channels):
 """
 import json as _json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -583,22 +584,81 @@ def _blur_source_watermarks(input_path: Path, output_path: Path, platform: str =
 _REMOTION_DIR = Path(__file__).parent.parent / "remotion"
 
 
+def _find_headless_browser() -> str | None:
+    """
+    Return the path of a headless browser that Remotion can use.
+
+    Priority (highest to lowest):
+      1. REMOTION_CHROME_EXECUTABLE env var  (user override)
+      2. Remotion's own downloaded headless-shell   (node_modules/.remotion/)
+      3. Playwright's chromium_headless_shell       (works in CI / containers)
+      4. System chrome-headless-shell / headless_shell
+      5. Full Chrome/Chromium — last resort; may fail with newer builds that
+         removed the legacy --headless mode.
+    """
+    # 1. Explicit user override
+    env_exe = os.environ.get("REMOTION_CHROME_EXECUTABLE", "")
+    if env_exe and Path(env_exe).is_file():
+        logger.debug(f"Browser from env REMOTION_CHROME_EXECUTABLE: {env_exe}")
+        return env_exe
+
+    # 2. Remotion's own headless-shell (downloaded by `remotion browser ensure`)
+    remotion_hs_dir = _REMOTION_DIR / "node_modules" / ".remotion" / "chrome-headless-shell"
+    for candidate in remotion_hs_dir.rglob("headless_shell"):
+        if candidate.is_file():
+            logger.debug(f"Browser from Remotion cache: {candidate}")
+            return str(candidate)
+
+    # 3. Playwright's chromium_headless_shell  (PLAYWRIGHT_BROWSERS_PATH or default paths)
+    pw_roots = [
+        Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")),
+        Path("/opt/pw-browsers"),
+        Path.home() / ".cache" / "ms-playwright",
+    ]
+    for pw_root in pw_roots:
+        if not pw_root.is_dir():
+            continue
+        # glob for any versioned chromium_headless_shell directory
+        for hs in sorted(pw_root.glob("chromium_headless_shell-*/chrome-linux/headless_shell"),
+                         reverse=True):
+            if hs.is_file():
+                logger.debug(f"Browser from Playwright: {hs}")
+                return str(hs)
+
+    # 4. System headless-shell binaries
+    for name in ("chrome-headless-shell", "chromium-headless-shell", "headless_shell"):
+        p = shutil.which(name)
+        if p:
+            logger.debug(f"Browser from PATH ({name}): {p}")
+            return p
+
+    # 5. Full Chrome/Chromium — older versions still support headless
+    for name in ("chromium-browser", "chromium", "google-chrome-stable", "google-chrome"):
+        p = shutil.which(name)
+        if p:
+            logger.debug(f"Browser from PATH (full chrome) — may not support headless: {p}")
+            return p
+
+    return None
+
+
 def _ensure_remotion(on_progress=None) -> bool:
     """
-    Check that Node.js is present and that Remotion packages are installed.
+    Check that Node.js is present, that Remotion packages are installed,
+    and that a compatible headless browser is available.
     Runs 'npm install' automatically on first call (takes ~60 s).
-    Returns True when Remotion is ready.
+    Returns True only when everything is ready.
     """
     if not shutil.which("node"):
         logger.warning(
-            "Node.js not found — Remotion unavailable, falling back to ffmpeg. "
-            "To enable Remotion, install Node.js: "
-            "sudo apt-get install -y nodejs npm"
+            "Node.js not found — Remotion unavailable. "
+            "Install: sudo apt-get install -y nodejs npm"
         )
         return False
     if not (_REMOTION_DIR / "package.json").exists():
         logger.debug("remotion/package.json missing — skipping Remotion")
         return False
+
     remotion_bin = _REMOTION_DIR / "node_modules" / ".bin" / "remotion"
     if not remotion_bin.exists():
         logger.info("Installing Remotion packages (first run — ~60 s)…")
@@ -615,13 +675,24 @@ def _ensure_remotion(on_progress=None) -> bool:
             if r.returncode != 0:
                 logger.warning(f"npm install failed:\n{r.stderr[-800:]}")
                 return False
-            logger.info("Remotion packages installed successfully.")
+            logger.info("Remotion packages installed.")
         except Exception as exc:
             logger.warning(f"npm install error: {exc}")
             return False
+
     if not remotion_bin.exists():
         logger.warning("Remotion binary not found after npm install")
         return False
+
+    browser = _find_headless_browser()
+    if not browser:
+        logger.warning(
+            "No headless browser found for Remotion. "
+            "Install one: sudo apt-get install -y chromium  OR  "
+            "set REMOTION_CHROME_EXECUTABLE=/path/to/headless_shell"
+        )
+        return False
+
     return True
 
 
@@ -657,10 +728,7 @@ def _render_with_remotion(
         sfx_public.mkdir(parents=True, exist_ok=True)
         sfx_dest = sfx_public / "woosh.mp3"
         if not sfx_dest.exists():
-            try:
-                sfx_dest.symlink_to(woosh_src.resolve())
-            except Exception:
-                shutil.copy2(woosh_src, sfx_dest)
+            shutil.copy2(woosh_src, sfx_dest)
         has_woosh = sfx_dest.exists()
 
     props_file = _REMOTION_DIR / f"_props_{session_id}.json"
@@ -672,10 +740,9 @@ def _render_with_remotion(
         for i, (path, label) in enumerate(zip(clip_paths, labels)):
             dest_name = f"clip_{i}.mp4"
             dest      = clips_public / dest_name
-            try:
-                dest.symlink_to(path.resolve())
-            except Exception:
-                shutil.copy2(path, dest)
+            # Always copy — Remotion bundles public/ into a temp webpack dir
+            # and does NOT follow symlinks, so symlinks would produce 404s.
+            shutil.copy2(path, dest)
 
             clip_refs.append({
                 "path":           f"{session_id}/{dest_name}",
@@ -716,20 +783,21 @@ def _render_with_remotion(
             "--log=error",
             "--overwrite",
             "--concurrency=4",
+            # swangle = software WebGL renderer — works without a GPU/display,
+            # required in containers, CI, and headless Linux servers.
+            "--gl=swangle",
         ]
 
-        # On Linux, Remotion needs a Chrome/Chromium binary for headless rendering.
-        # Detect system installation and pass it explicitly so Remotion doesn't
-        # silently fail or try to download its own Chromium.
-        chromium = (
-            shutil.which("chromium-browser")
-            or shutil.which("chromium")
-            or shutil.which("google-chrome-stable")
-            or shutil.which("google-chrome")
-        )
-        if chromium:
-            cmd.append(f"--browser-executable={chromium}")
-            logger.debug(f"Remotion using browser: {chromium}")
+        # Pass the headless browser explicitly so Remotion never tries to
+        # auto-download one (which requires internet access and can time out).
+        browser_exe = _find_headless_browser()
+        if browser_exe:
+            cmd.append(f"--browser-executable={browser_exe}")
+            logger.debug(f"Remotion using browser: {browser_exe}")
+        else:
+            # _ensure_remotion already checked this, but be safe
+            logger.warning("No headless browser available — aborting Remotion render")
+            return None
 
         result = subprocess.run(
             cmd,
