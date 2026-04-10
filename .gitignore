@@ -27,6 +27,13 @@ Thumbs.db
 # Node
 remotion/node_modules/
 
+# Remotion runtime files (session clips, props, Playwright browser cache)
+remotion/public/clips/
+remotion/public/sfx/
+remotion/_props_*.json
+remotion/.cache/
+remotion/node_modules/.remotion/
+
 # IDE
 .vscode/
 .idea/
