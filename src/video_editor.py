@@ -717,6 +717,20 @@ def _render_with_remotion(
             "--overwrite",
             "--concurrency=4",
         ]
+
+        # On Linux, Remotion needs a Chrome/Chromium binary for headless rendering.
+        # Detect system installation and pass it explicitly so Remotion doesn't
+        # silently fail or try to download its own Chromium.
+        chromium = (
+            shutil.which("chromium-browser")
+            or shutil.which("chromium")
+            or shutil.which("google-chrome-stable")
+            or shutil.which("google-chrome")
+        )
+        if chromium:
+            cmd.append(f"--browser-executable={chromium}")
+            logger.debug(f"Remotion using browser: {chromium}")
+
         result = subprocess.run(
             cmd,
             cwd=_REMOTION_DIR,
