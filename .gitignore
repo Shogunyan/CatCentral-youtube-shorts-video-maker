@@ -24,6 +24,9 @@ logs/*.log
 .DS_Store
 Thumbs.db
 
+# Node
+remotion/node_modules/
+
 # IDE
 .vscode/
 .idea/
