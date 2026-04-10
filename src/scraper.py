@@ -539,7 +539,7 @@ class VideoScraper:
             import google.generativeai as genai
 
             genai.configure(api_key=api_key)
-            model = genai.GenerativeModel("gemini-1.5-flash")
+            model = genai.GenerativeModel("gemini-2.0-flash")
 
             with open(frame_path, "rb") as f:
                 img_bytes = f.read()
@@ -623,7 +623,7 @@ class VideoScraper:
             import google.generativeai as genai
 
             genai.configure(api_key=api_key)
-            model = genai.GenerativeModel("gemini-1.5-flash")
+            model = genai.GenerativeModel("gemini-2.0-flash")
 
             n_frames = min(10, max(4, int(rv_duration / 8)))
             logger.info(
