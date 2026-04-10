@@ -860,10 +860,6 @@ class VideoScraper:
             src_title = src_info.get("title") or ""
             if not _is_cat_video(src_title) or _is_unwanted(src_title) or not _is_english(src_title):
                 continue
-            upload_year = int((src_info.get("upload_date") or "20200101")[:4])
-            if upload_year < 2020:
-                logger.debug(f"      Route 1 skip {src_id}: uploaded {upload_year} (pre-2020)")
-                continue
             duration = src_info.get("duration") or 0
             views    = src_info.get("view_count") or 0
 
@@ -952,9 +948,6 @@ class VideoScraper:
                                 if (not _is_cat_video(title)
                                         or _is_unwanted(title)
                                         or not _is_english(title)):
-                                    continue
-                                upload_year_r2 = int((e.get("upload_date") or "20200101")[:4])
-                                if upload_year_r2 < 2020:
                                     continue
                                 dur = e.get("duration") or 0
                                 if dur and dur > 90:
@@ -1086,9 +1079,6 @@ class VideoScraper:
                                         or _is_unwanted(title)
                                         or not _is_english(title)):
                                     continue
-                                upload_year_3a = int((e.get("upload_date") or "20200101")[:4])
-                                if upload_year_3a < 2020:
-                                    continue
                                 dur = e.get("duration") or 0
                                 if dur and dur > 90:
                                     continue
@@ -1207,9 +1197,6 @@ class VideoScraper:
                             title = e.get("title", "")
                             if (not _is_cat_video(title) or _is_unwanted(title)
                                     or not _is_english(title)):
-                                continue
-                            upload_year_3b = int((e.get("upload_date") or "20200101")[:4])
-                            if upload_year_3b < 2020:
                                 continue
                             dur = e.get("duration") or 0
                             if dur and dur > 90:
