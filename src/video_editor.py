@@ -618,11 +618,14 @@ def _find_headless_browser() -> str | None:
         return env_exe
 
     # 2. Remotion's own headless-shell (downloaded by `remotion browser ensure`)
-    remotion_hs_dir = _REMOTION_DIR / "node_modules" / ".remotion" / "chrome-headless-shell"
-    for candidate in remotion_hs_dir.rglob("headless_shell"):
-        if candidate.is_file():
-            logger.debug(f"Browser from Remotion cache: {candidate}")
-            return str(candidate)
+    #    The binary is named 'chrome-headless-shell' (NOT 'headless_shell') in
+    #    recent builds.  Search the whole .remotion cache dir for either name.
+    remotion_cache_dir = _REMOTION_DIR / "node_modules" / ".remotion"
+    for binary_name in ("chrome-headless-shell", "headless_shell"):
+        for candidate in sorted(remotion_cache_dir.rglob(binary_name), reverse=True):
+            if candidate.is_file():
+                logger.debug(f"Browser from Remotion cache ({binary_name}): {candidate}")
+                return str(candidate)
 
     # 3. Playwright's chromium_headless_shell  (PLAYWRIGHT_BROWSERS_PATH or default paths)
     pw_roots = [
@@ -710,26 +713,32 @@ def _ensure_remotion(on_progress=None) -> bool:
         # Auto-download Remotion's own headless browser
         logger.info("No headless browser found — downloading via 'remotion browser ensure'…")
         if on_progress:
-            on_progress("Downloading headless browser (first run, ~30 s)…")
+            on_progress("Downloading headless browser (first run, ~60 s)…")
         try:
             r = subprocess.run(
                 [str(remotion_bin), "browser", "ensure"],
                 cwd=_REMOTION_DIR,
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=180,
             )
+            combined_out = (r.stdout or "") + (r.stderr or "")
             if r.returncode == 0:
                 logger.info("Remotion browser downloaded successfully.")
-                browser = _find_headless_browser()
+            else:
+                logger.warning(f"remotion browser ensure exited {r.returncode}: {combined_out[-400:]}")
+            # Re-scan even on non-zero exit — partial downloads can still work
+            browser = _find_headless_browser()
         except Exception as exc:
             logger.warning(f"remotion browser ensure failed: {exc}")
 
     if not browser:
         logger.warning(
-            "No headless browser found for Remotion. "
-            "Install one: sudo apt-get install -y chromium  OR  "
-            "set REMOTION_CHROME_EXECUTABLE=/path/to/headless_shell"
+            "No headless browser found for Remotion.\n"
+            "Fix: run ONE of the following, then restart:\n"
+            "  sudo apt-get install -y chromium\n"
+            "  OR: npx playwright install chromium\n"
+            "  OR: set REMOTION_CHROME_EXECUTABLE=/path/to/chrome in .env"
         )
         return False
 
