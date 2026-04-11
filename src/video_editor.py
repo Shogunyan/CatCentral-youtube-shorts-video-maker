@@ -639,6 +639,12 @@ def _find_headless_browser() -> str | None:
             if hs.is_file():
                 logger.debug(f"Browser from Playwright: {hs}")
                 return str(hs)
+        # Also check full Playwright chromium (npx playwright install chromium)
+        for ch in sorted(pw_root.glob("chromium-*/chrome-linux/chrome"),
+                         reverse=True):
+            if ch.is_file():
+                logger.debug(f"Browser from Playwright (full chromium): {ch}")
+                return str(ch)
 
     # 4. System headless-shell binaries
     for name in ("chrome-headless-shell", "chromium-headless-shell", "headless_shell"):
@@ -700,6 +706,25 @@ def _ensure_remotion(on_progress=None) -> bool:
         return False
 
     browser = _find_headless_browser()
+    if not browser:
+        # Auto-download Remotion's own headless browser
+        logger.info("No headless browser found — downloading via 'remotion browser ensure'…")
+        if on_progress:
+            on_progress("Downloading headless browser (first run, ~30 s)…")
+        try:
+            r = subprocess.run(
+                [str(remotion_bin), "browser", "ensure"],
+                cwd=_REMOTION_DIR,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if r.returncode == 0:
+                logger.info("Remotion browser downloaded successfully.")
+                browser = _find_headless_browser()
+        except Exception as exc:
+            logger.warning(f"remotion browser ensure failed: {exc}")
+
     if not browser:
         logger.warning(
             "No headless browser found for Remotion. "
@@ -967,7 +992,6 @@ def create_ranking_video(
         "  4. Check the log file for the full Remotion error output.\n"
         "Tip: set LOG_LEVEL=DEBUG in .env for verbose Remotion logs."
     )
-    return output_path
 
 
 # ── CLI helper ────────────────────────────────────────────────────────────────
