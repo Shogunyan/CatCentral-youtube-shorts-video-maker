@@ -809,10 +809,26 @@ def _render_with_remotion(
                     str(dest),
                 )
                 logger.debug(f"  Scaled clip {i} to 720×1280 for Remotion")
-            except Exception:
-                # Fallback to direct copy if scaling fails
-                shutil.copy2(path, dest)
-                logger.warning(f"  Scale failed for clip {i} — using original")
+            except Exception as scale_err:
+                logger.warning(f"  Scale failed for clip {i}: {scale_err} — copying original")
+                try:
+                    shutil.copy2(path, dest)
+                except Exception as copy_err:
+                    logger.error(
+                        f"  Clip {i} is missing or unreadable — aborting render.\n"
+                        f"  Source path: {path}\n"
+                        f"  Scale error: {scale_err}\n"
+                        f"  Copy error:  {copy_err}"
+                    )
+                    if on_progress:
+                        on_progress(f"Clip {i + 1} missing: {path.name}")
+                    return None   # caller raises RuntimeError with full checklist
+
+            if not dest.exists() or dest.stat().st_size == 0:
+                logger.error(f"  Clip {i} file missing after scale/copy: {dest}")
+                if on_progress:
+                    on_progress(f"Clip {i + 1} empty after processing: {dest.name}")
+                return None
 
             # Use the actual clip duration so Remotion never shows black frames
             # at the end of a clip that is shorter than clip_duration.

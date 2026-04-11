@@ -493,8 +493,9 @@ class DashboardScreen(Screen):
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def on_mount(self) -> None:
-        from config import Config
+        from config import Config, setup_logging
         self._cfg = Config()
+        setup_logging(self._cfg)   # ← ensure log file is written for TUI runs too
         self._refresh_sched_label()
         self._log("CatCentral ready.  Press  R  or click  Run Now  to start.")
         self._check_tracker_on_mount()
