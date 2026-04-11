@@ -599,6 +599,22 @@ def _blur_source_watermarks(input_path: Path, output_path: Path, platform: str =
 _REMOTION_DIR = Path(__file__).parent.parent / "remotion"
 
 
+def _is_real_browser_binary(path: str) -> bool:
+    """
+    Return True only if the path is a real ELF executable, not a shell wrapper.
+
+    Ubuntu ships /usr/bin/chromium-browser as a shell script that prints
+    "requires the chromium snap to be installed" and exits 1.  Passing such
+    a wrapper to Remotion causes "Failed to launch the browser process!" and
+    an opaque ENOENT error.  We exclude it by checking the ELF magic bytes.
+    """
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(4) == b"\x7fELF"
+    except OSError:
+        return False
+
+
 def _find_headless_browser() -> str | None:
     """
     Return the path of a headless browser that Remotion can use.
@@ -652,16 +668,20 @@ def _find_headless_browser() -> str | None:
     # 4. System headless-shell binaries
     for name in ("chrome-headless-shell", "chromium-headless-shell", "headless_shell"):
         p = shutil.which(name)
-        if p:
+        if p and _is_real_browser_binary(p):
             logger.debug(f"Browser from PATH ({name}): {p}")
             return p
 
-    # 5. Full Chrome/Chromium — older versions still support headless
+    # 5. Full Chrome/Chromium — skip Ubuntu snap-wrapper scripts (they're shell
+    #    scripts that print "snap install chromium" and exit 1, causing Remotion
+    #    to fail with "Failed to launch browser process").
     for name in ("chromium-browser", "chromium", "google-chrome-stable", "google-chrome"):
         p = shutil.which(name)
-        if p:
-            logger.debug(f"Browser from PATH (full chrome) — may not support headless: {p}")
+        if p and _is_real_browser_binary(p):
+            logger.debug(f"Browser from PATH (full chrome): {p}")
             return p
+        elif p:
+            logger.debug(f"Skipping {p} — appears to be a shell wrapper, not a real binary")
 
     return None
 
@@ -735,10 +755,12 @@ def _ensure_remotion(on_progress=None) -> bool:
     if not browser:
         logger.warning(
             "No headless browser found for Remotion.\n"
-            "Fix: run ONE of the following, then restart:\n"
-            "  sudo apt-get install -y chromium\n"
-            "  OR: npx playwright install chromium\n"
-            "  OR: set REMOTION_CHROME_EXECUTABLE=/path/to/chrome in .env"
+            "Fix (pick ONE — run from the project directory):\n"
+            "  npx playwright install chromium          ← recommended\n"
+            "  OR: snap install chromium                ← Ubuntu snap\n"
+            "  OR: set REMOTION_CHROME_EXECUTABLE=/path/to/chrome in .env\n"
+            "Note: 'sudo apt-get install chromium-browser' installs a snap wrapper\n"
+            "      that does NOT work — use npx playwright install chromium instead."
         )
         return False
 
