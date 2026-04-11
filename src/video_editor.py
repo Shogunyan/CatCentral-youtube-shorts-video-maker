@@ -615,35 +615,71 @@ def _is_real_browser_binary(path: str) -> bool:
         return False
 
 
+def _browser_launches(path: str) -> bool:
+    """
+    Run the browser with --version to confirm it can actually start.
+
+    This catches the common case where a binary exists and is a real ELF file
+    but can't launch because it's missing shared libraries (libnss3, libgbm1,
+    etc.).  Those binaries exit non-zero with an error like:
+      'error while loading shared libraries: libnss3.so: No such file or directory'
+    which Remotion then surfaces as an opaque ENOENT render failure.
+    """
+    try:
+        r = subprocess.run(
+            [path, "--version"],
+            capture_output=True, text=True, timeout=8,
+        )
+        ok = r.returncode == 0
+        if not ok:
+            logger.debug(f"Browser {path} failed --version (rc={r.returncode}): {(r.stderr or r.stdout)[:200]}")
+        return ok
+    except Exception as exc:
+        logger.debug(f"Browser {path} --version threw: {exc}")
+        return False
+
+
 def _find_headless_browser() -> str | None:
     """
     Return the path of a headless browser that Remotion can use.
 
-    Priority (highest to lowest):
-      1. REMOTION_CHROME_EXECUTABLE env var  (user override)
-      2. Remotion's own downloaded headless-shell   (node_modules/.remotion/)
-      3. Playwright's chromium_headless_shell       (works in CI / containers)
-      4. System chrome-headless-shell / headless_shell
-      5. Full Chrome/Chromium — last resort; may fail with newer builds that
-         removed the legacy --headless mode.
+    Every candidate is validated with --version before being returned, so we
+    never hand Remotion a binary that can't launch (e.g. missing shared libs).
+
+    Priority:
+      1. REMOTION_CHROME_EXECUTABLE env var  (explicit user override)
+      2. Playwright's headless_shell  ← best: stripped binary, deps handled
+      3. Playwright's full chromium   ← good: deps installed by playwright
+      4. Remotion's own downloaded chrome-headless-shell
+      5. System headless-shell binaries
+      6. System full Chrome/Chromium (ELF only — skips snap wrapper scripts)
     """
-    # 1. Explicit user override
+    def _accept(path: str, label: str) -> str | None:
+        """Return path if it's a real binary AND can actually launch."""
+        if not _is_real_browser_binary(path):
+            logger.debug(f"Skipping {path} — not an ELF binary (likely a snap wrapper)")
+            return None
+        if not _browser_launches(path):
+            logger.warning(
+                f"Skipping {path} — binary exists but cannot launch.\n"
+                f"  This usually means missing system libraries.  Fix:\n"
+                f"    npx playwright install-deps chromium\n"
+                f"  OR: sudo apt-get install -y libnss3 libgbm1 libasound2 "
+                f"libatk1.0-0 libatk-bridge2.0-0 libxdamage1 libxfixes3"
+            )
+            return None
+        logger.debug(f"Browser OK ({label}): {path}")
+        return path
+
+    # 1. Explicit user override — trust it unconditionally
     env_exe = os.environ.get("REMOTION_CHROME_EXECUTABLE", "")
     if env_exe and Path(env_exe).is_file():
         logger.debug(f"Browser from env REMOTION_CHROME_EXECUTABLE: {env_exe}")
         return env_exe
 
-    # 2. Remotion's own headless-shell (downloaded by `remotion browser ensure`)
-    #    The binary is named 'chrome-headless-shell' (NOT 'headless_shell') in
-    #    recent builds.  Search the whole .remotion cache dir for either name.
-    remotion_cache_dir = _REMOTION_DIR / "node_modules" / ".remotion"
-    for binary_name in ("chrome-headless-shell", "headless_shell"):
-        for candidate in sorted(remotion_cache_dir.rglob(binary_name), reverse=True):
-            if candidate.is_file():
-                logger.debug(f"Browser from Remotion cache ({binary_name}): {candidate}")
-                return str(candidate)
-
-    # 3. Playwright's chromium_headless_shell  (PLAYWRIGHT_BROWSERS_PATH or default paths)
+    # 2 & 3. Playwright-managed browsers (headless_shell first, then full chromium).
+    # Playwright installs dependencies when you run 'npx playwright install chromium',
+    # making these the most reliable choice on a fresh machine.
     pw_roots = [
         Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")),
         Path("/opt/pw-browsers"),
@@ -652,36 +688,40 @@ def _find_headless_browser() -> str | None:
     for pw_root in pw_roots:
         if not pw_root.is_dir():
             continue
-        # glob for any versioned chromium_headless_shell directory
         for hs in sorted(pw_root.glob("chromium_headless_shell-*/chrome-linux/headless_shell"),
                          reverse=True):
-            if hs.is_file():
-                logger.debug(f"Browser from Playwright: {hs}")
-                return str(hs)
-        # Also check full Playwright chromium (npx playwright install chromium)
-        for ch in sorted(pw_root.glob("chromium-*/chrome-linux/chrome"),
-                         reverse=True):
-            if ch.is_file():
-                logger.debug(f"Browser from Playwright (full chromium): {ch}")
-                return str(ch)
+            p = _accept(str(hs), "Playwright headless_shell")
+            if p:
+                return p
+        for ch in sorted(pw_root.glob("chromium-*/chrome-linux/chrome"), reverse=True):
+            p = _accept(str(ch), "Playwright chromium")
+            if p:
+                return p
 
-    # 4. System headless-shell binaries
+    # 4. Remotion's own downloaded browser — may need extra system libs
+    remotion_cache_dir = _REMOTION_DIR / "node_modules" / ".remotion"
+    for binary_name in ("chrome-headless-shell", "headless_shell"):
+        for candidate in sorted(remotion_cache_dir.rglob(binary_name), reverse=True):
+            if candidate.is_file():
+                p = _accept(str(candidate), f"Remotion cache {binary_name}")
+                if p:
+                    return p
+
+    # 5. System headless-shell binaries
     for name in ("chrome-headless-shell", "chromium-headless-shell", "headless_shell"):
-        p = shutil.which(name)
-        if p and _is_real_browser_binary(p):
-            logger.debug(f"Browser from PATH ({name}): {p}")
-            return p
+        raw = shutil.which(name)
+        if raw:
+            p = _accept(raw, f"system {name}")
+            if p:
+                return p
 
-    # 5. Full Chrome/Chromium — skip Ubuntu snap-wrapper scripts (they're shell
-    #    scripts that print "snap install chromium" and exit 1, causing Remotion
-    #    to fail with "Failed to launch browser process").
+    # 6. Full Chrome/Chromium — skip snap wrapper scripts
     for name in ("chromium-browser", "chromium", "google-chrome-stable", "google-chrome"):
-        p = shutil.which(name)
-        if p and _is_real_browser_binary(p):
-            logger.debug(f"Browser from PATH (full chrome): {p}")
-            return p
-        elif p:
-            logger.debug(f"Skipping {p} — appears to be a shell wrapper, not a real binary")
+        raw = shutil.which(name)
+        if raw:
+            p = _accept(raw, f"system {name}")
+            if p:
+                return p
 
     return None
 
