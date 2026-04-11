@@ -914,10 +914,14 @@ def _render_with_remotion(
             timeout=1800,   # 30 min — generous for slow swangle renders
         )
 
-        # Always log the last 2 KB of output for post-mortem diagnostics
+        # Always log Remotion output — at INFO on success, WARNING on failure
+        # so it's visible without needing LOG_LEVEL=DEBUG.
         combined = ((result.stderr or "") + (result.stdout or "")).strip()
         if combined:
-            logger.debug(f"Remotion output (last 2KB):\n{combined[-2000:]}")
+            if result.returncode == 0:
+                logger.info(f"Remotion output (last 2KB):\n{combined[-2000:]}")
+            else:
+                logger.warning(f"Remotion output (last 2KB):\n{combined[-2000:]}")
 
         if result.returncode != 0:
             err = combined[-1200:].strip()
