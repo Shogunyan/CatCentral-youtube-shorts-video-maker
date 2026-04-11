@@ -15,6 +15,7 @@ import json as _json
 import logging
 import os
 import re
+import multiprocessing
 import shutil
 import subprocess
 import tempfile
@@ -758,7 +759,26 @@ def _render_with_remotion(
         for i, (path, label) in enumerate(zip(clip_paths, labels)):
             dest_name = f"clip_{i}.mp4"
             dest      = clips_public / dest_name
-            shutil.copy2(path, dest)
+
+            # Scale clips to 720×1280 before giving them to Remotion.
+            # The Remotion compositor (Rust) crashes with SIGABRT when decoding
+            # full-resolution 1080×1920 clips for 3+ sequential videos — its
+            # frame buffer overflows.  720×1280 uses 56% less memory per frame
+            # and always renders cleanly.  The React composition upscales back
+            # to 1080×1920 via object-fit:cover, so output quality is unchanged.
+            try:
+                _ffmpeg(
+                    "-i", str(path),
+                    "-vf", "scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280",
+                    "-c:v", VIDEO_CODEC, "-crf", "20", "-preset", "fast",
+                    "-c:a", "aac", "-b:a", "128k",
+                    str(dest),
+                )
+                logger.debug(f"  Scaled clip {i} to 720×1280 for Remotion")
+            except Exception:
+                # Fallback to direct copy if scaling fails
+                shutil.copy2(path, dest)
+                logger.warning(f"  Scale failed for clip {i} — using original")
 
             # Use the actual clip duration so Remotion never shows black frames
             # at the end of a clip that is shorter than clip_duration.
@@ -795,9 +815,10 @@ def _render_with_remotion(
         total_secs = total_frames_actual / fps
         if on_progress:
             on_progress(f"Rendering with Remotion ({total_secs:.0f}s video)…")
+        concurrency = min(4, multiprocessing.cpu_count())
         logger.info(
             f"Remotion render: {n} clips, {total_frames_actual} frames "
-            f"({total_secs:.0f}s), concurrency=8"
+            f"({total_secs:.0f}s), concurrency={concurrency}"
         )
 
         remotion_bin = _REMOTION_DIR / "node_modules" / ".bin" / "remotion"
@@ -809,12 +830,15 @@ def _render_with_remotion(
             f"--props={props_file.resolve()}",
             "--codec=h264",
             "--crf=18",
-            "--log=verbose",   # verbose so we can diagnose failures
+            "--log=verbose",
             "--overwrite",
-            "--concurrency=8",  # 8 parallel Chrome tabs — roughly 2× faster than 4
-            # swangle = software WebGL (Mesa/ANGLE) — works on headless Linux servers
-            # without a GPU or display server. Safe but slower than hardware EGL.
+            f"--concurrency={concurrency}",
+            # swangle = software WebGL — works without a GPU or display server.
             "--gl=swangle",
+            # Disable the native Rust compositor which crashes (SIGABRT) on some
+            # headless Linux systems when combined with swangle rendering.
+            # Pure-Chrome rendering is slightly slower but always stable.
+            "--disable-compositor",
         ]
 
         # Pass the headless browser explicitly so Remotion never tries to
