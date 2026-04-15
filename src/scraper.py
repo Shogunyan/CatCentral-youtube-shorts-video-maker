@@ -870,21 +870,13 @@ class VideoScraper:
                 title = e.get("title", "")
                 if not _is_cat_video(title) or not _is_english(title):
                     continue
-                if _is_unwanted(title):
-                    continue
+                # NOTE: do NOT call _is_unwanted() here — it blocks "ranked" /
+                # "ranking" which are exactly the words we need. _is_unwanted is
+                # for source clips, not for ranking videos themselves.
                 if not _is_ranking_video(title):
                     continue
                 views = e.get("view_count") or 0
                 if views < min_views:
-                    continue
-                # Shorts-only: reject videos longer than MAX_SHORTS_DURATION.
-                # flat-extract often returns None for duration — only reject if
-                # we have a value and it clearly exceeds the limit.
-                dur = e.get("duration")
-                if dur is not None and dur > MAX_SHORTS_DURATION:
-                    logger.debug(
-                        f"  Skipping {vid_id} — duration {dur:.0f}s > {MAX_SHORTS_DURATION}s"
-                    )
                     continue
                 seen.add(vid_id)
                 found.append({
@@ -892,7 +884,6 @@ class VideoScraper:
                     "url":        f"https://www.youtube.com/watch?v={vid_id}",
                     "title":      title,
                     "view_count": views,
-                    "duration":   dur,
                 })
 
         found.sort(key=lambda x: x["view_count"], reverse=True)
@@ -932,14 +923,6 @@ class VideoScraper:
         chapters    = info.get("chapters") or []
         rv_duration = info.get("duration") or 0
         clips: list[dict] = []
-
-        # ── Shorts-only guard ─────────────────────────────────────────────────
-        # If we didn't have a duration at search time, enforce it now.
-        if rv_duration and rv_duration > MAX_SHORTS_DURATION:
-            logger.info(
-                f"    Skipping — duration {rv_duration:.0f}s exceeds Shorts limit ({MAX_SHORTS_DURATION}s)"
-            )
-            return []
 
         # ── Route A: Gemini Vision → direct time-range slices ────────────────
         # Gemini WATCHES the video (multi-frame) and identifies exactly where
