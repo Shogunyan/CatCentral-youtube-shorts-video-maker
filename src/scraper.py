@@ -857,9 +857,7 @@ class VideoScraper:
                 break
             logger.info(f"  Searching ranking sources: '{q[:55]}'")
             try:
-                # Prefix with 'ytsearchXX' and route through the /shorts/ filter
-                # so YouTube returns Shorts rather than long-form videos.
-                entries = self._ydl_extract_flat(f"ytsearch25:{q} #shorts", playlist_end=25)
+                entries = self._ydl_extract_flat(f"ytsearch20:{q}", playlist_end=20)
             except Exception as ex:
                 logger.debug(f"Ranking search failed '{q}': {ex}")
                 continue
@@ -879,19 +877,19 @@ class VideoScraper:
                 views = e.get("view_count") or 0
                 if views < min_views:
                     continue
-                # Shorts-only: reject videos longer than 60 s.
-                # flat-extract often returns a `duration`; if missing, don't
-                # reject (we'll re-check duration when we fetch full info).
+                # Shorts-only: reject videos longer than MAX_SHORTS_DURATION.
+                # flat-extract often returns None for duration — only reject if
+                # we have a value and it clearly exceeds the limit.
                 dur = e.get("duration")
                 if dur is not None and dur > MAX_SHORTS_DURATION:
                     logger.debug(
-                        f"  Skipping {vid_id} — duration {dur:.0f}s > {MAX_SHORTS_DURATION}s (not a Short)"
+                        f"  Skipping {vid_id} — duration {dur:.0f}s > {MAX_SHORTS_DURATION}s"
                     )
                     continue
                 seen.add(vid_id)
                 found.append({
                     "id":         vid_id,
-                    "url":        f"https://www.youtube.com/shorts/{vid_id}",
+                    "url":        f"https://www.youtube.com/watch?v={vid_id}",
                     "title":      title,
                     "view_count": views,
                     "duration":   dur,
@@ -1106,11 +1104,15 @@ class VideoScraper:
         logger.info(f"Searching for cat ranking Shorts with {RANKING_MIN_VIEWS:,}+ views…")
         ranking_vids = self._find_ranking_videos(min_views=RANKING_MIN_VIEWS)
 
+        if len(ranking_vids) < 2:
+            logger.info("Not enough 200K+ rankings — widening to 100K+…")
+            ranking_vids = self._find_ranking_videos(min_views=100_000)
+        if len(ranking_vids) < 2:
+            logger.info("Still short — widening to 50K+…")
+            ranking_vids = self._find_ranking_videos(min_views=50_000)
+
         if not ranking_vids:
-            logger.warning(
-                f"Could not find any cat ranking Shorts with ≥{RANKING_MIN_VIEWS:,} views "
-                f"— returning empty"
-            )
+            logger.warning("Could not find any cat ranking Shorts — returning empty")
             return []
 
         # ── Analyse ranking videos; build popularity cross-reference map ─────
