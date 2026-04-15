@@ -130,7 +130,7 @@ class Downloader:
             if downloaded:
                 h = _probe_height(downloaded)
                 # Only apply height filter to standalone clips — ranking slices
-                # come from proven 1M+ view Shorts and are always usable.
+                # come from proven 200K+ view Shorts and are always usable.
                 if h and h < MIN_CLIP_HEIGHT and platform != "ranking_slice":
                     logger.warning(
                         f"Clip too low-res ({h}p < {MIN_CLIP_HEIGHT}p), skipping {vid_id}"
@@ -199,7 +199,7 @@ class Downloader:
                     return None
                 h = _probe_height(downloaded)
                 # Skip height filter for ranking slices — they come from
-                # proven 1M+ view Shorts, quality is always acceptable.
+                # proven 200K+ view Shorts, quality is always acceptable.
                 if h and h < MIN_CLIP_HEIGHT and platform != "ranking_slice":
                     logger.warning(
                         f"Segment too low-res ({h}p < {MIN_CLIP_HEIGHT}p), skipping {vid_id}"

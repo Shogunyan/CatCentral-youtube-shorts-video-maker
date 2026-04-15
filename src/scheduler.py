@@ -88,7 +88,7 @@ class Pipeline:
         self._report(4, "✏  Theme picked", f"Title: {title}")
 
         self._report(5, "🔍  Scraping viral cat videos…",
-                     "Searching for 1M+ view cat ranking Shorts…")
+                     "Searching for 200K+ view cat ranking Shorts…")
         candidates = self.scraper.get_candidates(want=n * 5)
         if not candidates:
             self._report(5, "❌  Scraping failed",

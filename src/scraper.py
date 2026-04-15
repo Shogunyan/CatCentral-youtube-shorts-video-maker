@@ -1,20 +1,24 @@
 """
-scraper.py — Discovers viral cat clips from proven 1M+ view ranking Shorts.
+scraper.py — Discovers viral cat clips by WATCHING cat ranking Shorts.
 
 Strategy:
-  1. Find cat ranking Shorts with ≥ 1M views (falls back to 500K then 100K).
-  2. Analyse up to RANKING_ANALYSE_LIMIT of them; build a cross-reference map
-     so clips appearing in multiple rankings are scored higher.
+  1. Find cat ranking YouTube Shorts (≤60 s) with ≥ 200 K views.
+  2. Analyse up to RANKING_ANALYSE_LIMIT of them by literally watching the
+     video — multi-frame Gemini Vision identifies the funny moments and their
+     exact timestamps. We then slice those timestamps out of the ranking video.
   3. Take CLIPS_FROM_FIRST_RANKING clips from the #1 ranking video and
      CLIPS_FROM_SECOND_RANKING from the #2 ranking video (= 5 total).
   4. Fill remaining slots from cross-referenced clips, then reusable clips.
 
-Source-clip detection (four routes per ranking video):
-  Route 1 — Description links  → fetch exact source clip metadata from YouTube.
-  Route 2 — Gemini Vision      → multi-frame analysis identifies timestamps;
-                                  clips are sliced directly from the ranking video.
-  Route 3 — Chapter slicing    → slice ranking video at chapter boundaries.
-  Route 4 — Even slicing       → last resort; divide ranking video into N segments.
+Source-clip detection (three routes per ranking video — no description parsing):
+  Route A — Gemini Vision    → multi-frame analysis identifies funny timestamps;
+                                clips are sliced directly from the ranking video.
+  Route B — Chapter slicing  → slice ranking video at chapter boundaries.
+  Route C — Even slicing     → last resort; divide ranking video into N segments.
+
+All routes slice the ranking video itself — clips never come from external
+YouTube videos parsed out of descriptions. This keeps sources on-theme and
+avoids dragging in random non-ranking cat videos.
 """
 import json
 import logging
@@ -113,7 +117,11 @@ SEGMENT_TARGET_SECS = 28
 # other creators and millions of viewers.
 
 # Only mine ranking videos above this view threshold.
-RANKING_MIN_VIEWS = 1_000_000   # 1 million — truly viral only
+RANKING_MIN_VIEWS = 200_000   # 200K — proven popular cat ranking Shorts
+
+# Only accept actual YouTube Shorts (duration ≤ this many seconds).
+# YouTube classifies anything ≤60 s as a Short.
+MAX_SHORTS_DURATION = 60
 
 # Clips taken from each ranking video: 3 from #1, 2 from #2 = 5 total.
 CLIPS_FROM_FIRST_RANKING  = 3
@@ -836,10 +844,9 @@ class VideoScraper:
         """
         Search extensively for cat ranking Shorts with at least min_views.
 
+        Only accepts actual YouTube Shorts (duration ≤ MAX_SHORTS_DURATION).
         Casts a wide net across all RANKING_SOURCE_QUERIES, then filters
-        down to videos that meet the view-count bar.  If flat-extract doesn't
-        return a view count, we skip that entry (avoids slow full-info fetches
-        for every result).
+        down to videos that meet the view-count AND Shorts-duration bar.
         """
         seen: set[str] = set()
         found: list[dict] = []
@@ -850,7 +857,9 @@ class VideoScraper:
                 break
             logger.info(f"  Searching ranking sources: '{q[:55]}'")
             try:
-                entries = self._ydl_extract_flat(f"ytsearch20:{q}", playlist_end=20)
+                # Prefix with 'ytsearchXX' and route through the /shorts/ filter
+                # so YouTube returns Shorts rather than long-form videos.
+                entries = self._ydl_extract_flat(f"ytsearch25:{q} #shorts", playlist_end=25)
             except Exception as ex:
                 logger.debug(f"Ranking search failed '{q}': {ex}")
                 continue
@@ -863,22 +872,34 @@ class VideoScraper:
                 title = e.get("title", "")
                 if not _is_cat_video(title) or not _is_english(title):
                     continue
+                if _is_unwanted(title):
+                    continue
                 if not _is_ranking_video(title):
                     continue
                 views = e.get("view_count") or 0
                 if views < min_views:
                     continue
+                # Shorts-only: reject videos longer than 60 s.
+                # flat-extract often returns a `duration`; if missing, don't
+                # reject (we'll re-check duration when we fetch full info).
+                dur = e.get("duration")
+                if dur is not None and dur > MAX_SHORTS_DURATION:
+                    logger.debug(
+                        f"  Skipping {vid_id} — duration {dur:.0f}s > {MAX_SHORTS_DURATION}s (not a Short)"
+                    )
+                    continue
                 seen.add(vid_id)
                 found.append({
                     "id":         vid_id,
-                    "url":        f"https://www.youtube.com/watch?v={vid_id}",
+                    "url":        f"https://www.youtube.com/shorts/{vid_id}",
                     "title":      title,
                     "view_count": views,
+                    "duration":   dur,
                 })
 
         found.sort(key=lambda x: x["view_count"], reverse=True)
         logger.info(
-            f"  Found {len(found)} ranking videos with ≥{min_views:,} views"
+            f"  Found {len(found)} cat ranking Shorts with ≥{min_views:,} views"
         )
         return found
 
@@ -888,14 +909,15 @@ class VideoScraper:
         """
         "Watch" a ranking video and extract the individual cat clips it used.
 
-        Priority order:
-          1. Description links  → directly fetch each source clip's info
-          2. Gemini Vision      → identify timestamps; slice ranking video directly
-          3. Chapter slicing    → slice ranking video at chapter boundaries
-          4. Even slicing       → last resort; divide video into N even segments
+        We literally watch the video via Gemini Vision, identify the funny
+        moments and their timestamps, then slice those timestamps directly out
+        of the ranking video.  No description parsing, no YouTube searching —
+        every clip is guaranteed to come from the ranking Short itself.
 
-        All routes except Route 1 slice the ranking video itself — no external
-        YouTube searches, so clips are guaranteed to be from the same video.
+        Priority order:
+          A. Gemini Vision    → identify timestamps; slice ranking video directly
+          B. Chapter slicing  → slice ranking video at chapter boundaries
+          C. Even slicing     → last resort; divide video into N even segments
 
         Returns a list of clip dicts, each tagged with _ranking_vid_id and
         _ranking_views so we can cross-reference across multiple ranking videos.
@@ -907,77 +929,35 @@ class VideoScraper:
         if not info:
             return []
 
-        rv_id     = rv["id"]
-        rv_views  = rv["view_count"]
-        desc      = info.get("description") or ""
-        chapters  = info.get("chapters") or []
+        rv_id       = rv["id"]
+        rv_views    = rv["view_count"]
+        chapters    = info.get("chapters") or []
+        rv_duration = info.get("duration") or 0
         clips: list[dict] = []
 
-        # ── Route 1: description contains source YouTube links ────────────────
-        src_ids = [
-            sid for sid in _YT_ID_RE.findall(desc)
-            if sid != rv_id and sid not in seen_ids and not self._is_used(sid)
-        ]
-        logger.info(f"    {len(src_ids)} source ID(s) found in description")
+        # ── Shorts-only guard ─────────────────────────────────────────────────
+        # If we didn't have a duration at search time, enforce it now.
+        if rv_duration and rv_duration > MAX_SHORTS_DURATION:
+            logger.info(
+                f"    Skipping — duration {rv_duration:.0f}s exceeds Shorts limit ({MAX_SHORTS_DURATION}s)"
+            )
+            return []
 
-        for src_id in src_ids:
-            seen_ids.add(src_id)
-            src_url  = f"https://www.youtube.com/watch?v={src_id}"
-            src_info = self._ydl_get_info(src_url)
-            if not src_info:
-                continue
-            src_title = src_info.get("title") or ""
-            if not _is_cat_video(src_title) or _is_unwanted(src_title) or not _is_english(src_title):
-                continue
-            duration = src_info.get("duration") or 0
-            views    = src_info.get("view_count") or 0
+        # ── Route A: Gemini Vision → direct time-range slices ────────────────
+        # Gemini WATCHES the video (multi-frame) and identifies exactly where
+        # each funny cat moment starts and ends. We slice those timestamps
+        # directly — no YouTube searches, no risk of pulling unrelated videos.
+        api_key = os.getenv("GEMINI_API_KEY", "")
 
-            if duration and duration > 60:
-                # Long source — slice best segments out of it
-                segs = self._clips_from_compilation({
-                    "id": src_id, "url": src_url, "title": src_title,
-                    "duration": duration, "view_count": views,
-                })
-                for s in segs:
-                    s["_ranking_vid_id"]  = rv_id
-                    s["_ranking_views"]   = rv_views
-                clips.extend(segs)
-                logger.info(
-                    f"    Source {src_id}: {len(segs)} segments from {duration:.0f}s"
-                )
-            else:
-                clips.append({
-                    "id":               src_id,
-                    "url":              src_url,
-                    "title":            src_title,
-                    "start_time":       None,
-                    "end_time":         None,
-                    "platform":         "youtube",
-                    "view_count":       views,
-                    "like_count":       src_info.get("like_count") or 0,
-                    "duration":         duration,
-                    "_ranking_vid_id":  rv_id,
-                    "_ranking_views":   rv_views,
-                })
-                # Persist to viral DB — verified standalone clip from a viral ranking
-                self._viral_db.record(
-                    src_id, src_url, src_title, views, rv_id, rv_views
-                )
-
-        # ── Route 2: Gemini Vision → direct time-range slices ────────────────
-        # Gemini identifies EXACTLY where each cat clip starts/ends inside the
-        # ranking video. We slice those timestamps directly — no YouTube
-        # searching, no risk of pulling unrelated videos.
-        api_key     = os.getenv("GEMINI_API_KEY", "")
-        rv_duration = info.get("duration") or 0
-
-        if not clips and api_key and rv_duration >= 10:
+        if api_key and rv_duration >= 10:
             gemini_clips = self._gemini_analyze_ranking_video(
                 rv["url"], rv_duration, chapters, api_key
             )
+            # Extra gate: reject anything Gemini flagged as non-English
+            gemini_clips = [gc for gc in gemini_clips if gc.get("is_english", True)]
             if gemini_clips:
                 logger.info(
-                    f"    Route 2 (Gemini Vision): "
+                    f"    Route A (Gemini Vision): "
                     f"{len(gemini_clips)} clip timestamps identified"
                 )
                 for gc in gemini_clips:
@@ -1004,11 +984,11 @@ class VideoScraper:
                         "_view_estimate":     gc["view_count_estimate"],
                     })
 
-        # ── Route 3: Chapter timestamp slicing ────────────────────────────────
+        # ── Route B: Chapter timestamp slicing ────────────────────────────────
         # Chapter markers tell us exactly where each clip starts/ends.
         # Slice the ranking video at those boundaries. No searching needed.
         if not clips and chapters and rv_duration >= 10:
-            logger.info(f"    Route 3 (chapter slicing): {len(chapters)} chapters")
+            logger.info(f"    Route B (chapter slicing): {len(chapters)} chapters")
             last_end: float = -999.0
             for ch in chapters:
                 start   = float(ch.get("start_time", 0))
@@ -1043,11 +1023,11 @@ class VideoScraper:
                     "_ranking_views":  rv_views,
                 })
 
-        # ── Route 4: Even time slicing ────────────────────────────────────────
-        # Last resort when no chapters and no Gemini key.
+        # ── Route C: Even time slicing ────────────────────────────────────────
+        # Last resort when Gemini Vision fails and no chapters are available.
         if not clips and rv_duration >= 15:
             n = min(5, max(2, int(rv_duration / 15)))
-            logger.info(f"    Route 4 (even slicing): {n} segments from {rv_duration:.0f}s")
+            logger.info(f"    Route C (even slicing): {n} segments from {rv_duration:.0f}s")
             for i in range(n):
                 start   = max(3.0, rv_duration * i / n)
                 end     = min(rv_duration * (i + 1) / n, start + SEGMENT_TARGET_SECS)
@@ -1099,12 +1079,13 @@ class VideoScraper:
     def get_candidates(self, want: int = 25) -> list[dict]:
         """
         Return up to `want` clip candidates sourced from proven viral
-        cat ranking Shorts (1M+ views).
+        cat ranking Shorts (200K+ views).
 
         Strategy:
-          1. Find ranking videos with 1M+ views (fallback to 500K / 100K).
-          2. Analyse up to RANKING_ANALYSE_LIMIT of them; build a cross-reference
-             map so clips used by multiple rankings are ranked highest.
+          1. Find cat ranking Shorts with 200K+ views.
+          2. Analyse up to RANKING_ANALYSE_LIMIT of them by WATCHING each one
+             via Gemini Vision; build a cross-reference map so clips used by
+             multiple rankings are ranked highest.
           3. Take CLIPS_FROM_FIRST_RANKING from the #1 ranking video and
              CLIPS_FROM_SECOND_RANKING from the #2 ranking video.
           4. Fill any remaining slots from cross-referenced clips, then
@@ -1122,18 +1103,14 @@ class VideoScraper:
         seen_ids: set[str] = set()
 
         # ── Find ranking videos ───────────────────────────────────────────────
-        logger.info("Searching for cat ranking Shorts with 1M+ views…")
-        ranking_vids = self._find_ranking_videos(min_views=1_000_000)
-
-        if len(ranking_vids) < 2:
-            logger.info("Not enough 1M+ rankings — widening to 500K+…")
-            ranking_vids = self._find_ranking_videos(min_views=500_000)
-        if len(ranking_vids) < 2:
-            logger.info("Still short — widening to 100K+…")
-            ranking_vids = self._find_ranking_videos(min_views=100_000)
+        logger.info(f"Searching for cat ranking Shorts with {RANKING_MIN_VIEWS:,}+ views…")
+        ranking_vids = self._find_ranking_videos(min_views=RANKING_MIN_VIEWS)
 
         if not ranking_vids:
-            logger.warning("Could not find any cat ranking videos — returning empty")
+            logger.warning(
+                f"Could not find any cat ranking Shorts with ≥{RANKING_MIN_VIEWS:,} views "
+                f"— returning empty"
+            )
             return []
 
         # ── Analyse ranking videos; build popularity cross-reference map ─────
