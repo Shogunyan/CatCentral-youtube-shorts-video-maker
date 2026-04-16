@@ -106,29 +106,22 @@ def _parse_comment_timestamps(
     popular.sort(key=lambda x: x[1], reverse=True)
     return [float(ts) for ts, _ in popular]
 
-MAX_CLIP_REUSE = 2
+MAX_CLIP_REUSE = 9999   # effectively unlimited — clips can always be re-used
 
 # Seconds of source clip kept around each detected peak moment.
 SEGMENT_TARGET_SECS = 28
 
 # ── Ranking-video strategy ────────────────────────────────────────────────────
-# ALL clips are sourced exclusively from proven viral cat ranking Shorts.
-# This guarantees every clip has already been validated as iconic/popular by
-# other creators and millions of viewers.
+# Clone the single highest-viewed cat ranking Short we can find:
+# Gemini watches it in full, detects every rank-transition boundary, and we
+# re-assemble the exact same clips (same order, same timing) under our own
+# branding (watermark + swapped text colors).
 
 # Only mine ranking videos above this view threshold.
-RANKING_MIN_VIEWS = 200_000   # 200K — proven popular cat ranking Shorts
+RANKING_MIN_VIEWS = 50_000   # 50K — broad enough to find fresh daily content
 
-# Only accept actual YouTube Shorts (duration ≤ this many seconds).
-# YouTube classifies anything ≤60 s as a Short.
-MAX_SHORTS_DURATION = 60
-
-# Clips taken from each ranking video: 3 from #1, 2 from #2 = 5 total.
-CLIPS_FROM_FIRST_RANKING  = 3
-CLIPS_FROM_SECOND_RANKING = 2
-
-# Max ranking videos analysed to build the cross-reference popularity map.
-# Higher = better cross-channel viral-clip validation; diminishing returns after 15.
+# Max ranking videos analysed.  With the clone strategy we only need 1 (the
+# best one), but we scan a larger pool to ensure we find a fresh video.
 RANKING_ANALYSE_LIMIT = 15
 
 # Large, varied query set — we cast a wide net then filter by 1M+ views.
@@ -711,9 +704,9 @@ class VideoScraper:
         try:
             import json as _json
 
-            # Dense sampling: ~1 frame every 5 s, capped at 30 frames.
-            # Enough to see rank-number changes even in 2-3 min compilations.
-            n_frames = min(30, max(8, int(rv_duration / 5)))
+            # Dense sampling: ~1 frame every 2 s, capped at 60 frames.
+            # Fine enough to catch every rank-number change on screen.
+            n_frames = min(60, max(15, int(rv_duration / 2)))
             logger.info(
                 f"    Gemini: extracting {n_frames} frames from "
                 f"{rv_duration:.0f}s video to detect rank transitions…"
@@ -1081,159 +1074,64 @@ class VideoScraper:
 
     def get_candidates(self, want: int = 25) -> list[dict]:
         """
-        Return up to `want` clip candidates sourced from proven viral
-        cat ranking Shorts (200K+ views).
+        Clone the single highest-viewed cat ranking Short we can find.
 
         Strategy:
-          1. Find cat ranking Shorts with 200K+ views.
-          2. Analyse up to RANKING_ANALYSE_LIMIT of them by WATCHING each one
-             via Gemini Vision; build a cross-reference map so clips used by
-             multiple rankings are ranked highest.
-          3. Take CLIPS_FROM_FIRST_RANKING from the #1 ranking video and
-             CLIPS_FROM_SECOND_RANKING from the #2 ranking video.
-          4. Fill any remaining slots from cross-referenced clips, then
-             reusable clips.
+          1. Find cat ranking Shorts (50K+ views); pick the #1 by view count.
+          2. Have Gemini watch it entirely — dense frame sampling detects every
+             rank-transition on screen.
+          3. Return the clips in the exact same order as the original
+             (start_time ascending = rank 5 first → rank 1 last), so the output
+             video mirrors the source in clip choice, timing, and sequence.
         """
-        def _dedup(videos: list[dict]) -> list[dict]:
-            seen: set[str] = set()
-            out: list[dict] = []
-            for v in videos:
-                if v.get("id") and v["id"] not in seen:
-                    seen.add(v["id"])
-                    out.append(v)
-            return out
-
         seen_ids: set[str] = set()
 
         # ── Find ranking videos ───────────────────────────────────────────────
         logger.info(f"Searching for cat ranking Shorts with {RANKING_MIN_VIEWS:,}+ views…")
         ranking_vids = self._find_ranking_videos(min_views=RANKING_MIN_VIEWS)
 
-        if len(ranking_vids) < 2:
-            logger.info("Not enough 200K+ rankings — widening to 100K+…")
-            ranking_vids = self._find_ranking_videos(min_views=100_000)
-        if len(ranking_vids) < 2:
-            logger.info("Still short — widening to 50K+…")
-            ranking_vids = self._find_ranking_videos(min_views=50_000)
-
         if not ranking_vids:
-            logger.warning("Could not find any cat ranking Shorts — returning empty")
+            logger.info("No 50K+ results — widening to 20K+…")
+            ranking_vids = self._find_ranking_videos(min_views=20_000)
+        if not ranking_vids:
+            logger.info("Still none — widening to 10K+…")
+            ranking_vids = self._find_ranking_videos(min_views=10_000)
+        if not ranking_vids:
+            logger.warning("Could not find any cat ranking videos — returning empty")
             return []
 
-        # ── Analyse ranking videos; build popularity cross-reference map ─────
-        logger.info(
-            f"Analysing top {min(RANKING_ANALYSE_LIMIT, len(ranking_vids))} "
-            f"ranking videos…"
-        )
-        # Map: source_clip_id → {clip_data, cross_count}
-        cross_map: dict[str, dict] = {}
-        # List of (ranking_vid, [source_clips]) in view-count order
-        analysed: list[tuple[dict, list[dict]]] = []
-
-        for rv in ranking_vids[:RANKING_ANALYSE_LIMIT]:
+        # ── Clone the single highest-viewed ranking video ─────────────────────
+        # Try in view-count order until one yields clips (Gemini can fail on
+        # private / geo-blocked / deleted videos).
+        clips: list[dict] = []
+        for rv in ranking_vids[:5]:
             seen_ids.add(rv["id"])
+            logger.info(
+                f"Cloning: '{rv['title'][:60]}' ({rv['view_count']:,} views)"
+            )
             clips = self._analyze_ranking_video(rv, seen_ids)
-            fresh = [c for c in clips if self._use_count(c["id"]) == 0]
-            if fresh:
-                analysed.append((rv, fresh))
-            for c in fresh:
-                sid = c["id"]
-                if sid in cross_map:
-                    cross_map[sid]["_cross_count"] += 1
-                else:
-                    cross_map[sid] = {**c, "_cross_count": 1}
-
-        if not analysed:
-            logger.warning("No source clips found in any ranking video")
-            reusable = self._get_reusable_candidates()
-            return reusable[:want]
-
-        # ── Pick clips: 3 from #1 ranking video, 2 from #2 ───────────────────
-        def _rank_key(c: dict) -> tuple:
-            viral_score = self._viral_db.get_viral_score(c["id"])
-            cross_count = cross_map.get(c["id"], {}).get("_cross_count", 0)
-            return (
-                # Clips that appear in MULTIPLE viral ranking videos rank first
-                -(viral_score * 3 + cross_count),
-                # Then by standalone view count
-                -c.get("view_count", 0),
-            )
-
-        selected: list[dict] = []
-
-        if len(analysed) >= 1:
-            rv1, clips1 = analysed[0]
-            clips1_sorted = sorted(clips1, key=_rank_key)
-            take = clips1_sorted[:CLIPS_FROM_FIRST_RANKING]
-            selected.extend(take)
-            logger.info(
-                f"  Ranking #1 '{rv1['title'][:50]}' "
-                f"({rv1['view_count']:,} views) → {len(take)} clips"
-            )
-
-        if len(analysed) >= 2:
-            rv2, clips2 = analysed[1]
-            used = {c["id"] for c in selected}
-            clips2_sorted = sorted(
-                [c for c in clips2 if c["id"] not in used], key=_rank_key
-            )
-            take = clips2_sorted[:CLIPS_FROM_SECOND_RANKING]
-            selected.extend(take)
-            logger.info(
-                f"  Ranking #2 '{rv2['title'][:50]}' "
-                f"({rv2['view_count']:,} views) → {len(take)} clips"
-            )
-
-        # ── Fill remaining slots from cross-referenced pool ───────────────────
-        if len(selected) < want:
-            used = {c["id"] for c in selected}
-            # All cross-referenced clips, sorted by how many rankings used them
-            xref_pool = sorted(
-                [c for c in cross_map.values() if c["id"] not in used],
-                key=lambda c: (-c.get("_cross_count", 0), -c.get("view_count", 0)),
-            )
-            for c in xref_pool:
-                if len(selected) >= want:
-                    break
-                selected.append(c)
-            logger.info(
-                f"  Cross-reference fill: now have {len(selected)}/{want} clips"
-            )
-
-        # ── Last resort: reusable clips ───────────────────────────────────────
-        if len(selected) < want:
-            used = {c["id"] for c in selected}
-            reusable = [
-                c for c in self._get_reusable_candidates()
-                if c["id"] not in used
-            ]
-            selected.extend(reusable[: want - len(selected)])
-            logger.info(f"  Reuse fill: now have {len(selected)}/{want} clips")
-
-        # ── URL dedup: one original standalone video per clip slot ─────────────
-        # Prevents the same YouTube video from filling multiple rank slots.
-        # Segment clips (start_time != None) are exempt — they're different
-        # timestamped moments from a ranking compilation and are already diverse.
-        url_seen: set[str] = set()
-        url_clean: list[dict] = []
-        for c in selected:
-            url = c.get("url", "")
-            if c.get("start_time") is not None:
-                url_clean.append(c)   # segment from ranking video — allow multiple
-            elif url and url in url_seen:
-                logger.debug(
-                    f"  URL-dedup: skipping duplicate standalone {c.get('id')} ({url[-40:]})"
+            if clips:
+                logger.info(
+                    f"  ✓ {len(clips)} clips extracted from "
+                    f"'{rv['title'][:50]}'"
                 )
-            else:
-                url_seen.add(url)
-                url_clean.append(c)
-        selected = url_clean
+                break
+            logger.info("  No clips — trying next ranking video…")
 
-        # Annotate every selected clip with its viral_score from the persistent DB
-        # so downstream (video_editor, Remotion overlay) can render badges.
-        for c in selected:
+        if not clips:
+            logger.warning("No clips extracted — falling back to reusable pool")
+            return self._get_reusable_candidates()[:want]
+
+        # Preserve original video order: sort by start_time so clip sequence
+        # mirrors the source video (rank 5 first → rank 1 last).
+        clips.sort(key=lambda c: c.get("start_time") or 0)
+
+        # Annotate with viral scores for the badge overlay
+        for c in clips:
             c["_viral_score"] = self._viral_db.get_viral_score(c["id"])
 
-        result = _dedup(selected)
-        logger.info(f"Returning {len(result)} candidates from viral ranking sources")
+        result = clips[:want]
+        logger.info(
+            f"Returning {len(result)} clips in original video order"
+        )
         return result

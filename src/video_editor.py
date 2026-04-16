@@ -471,7 +471,7 @@ _PLATFORM_BLUR_REGIONS: dict[str, list[tuple]] = {
     # creator's overlays (title bar + left-side rank panel). Always blur these
     # regions so they don't conflict with our own ranking overlay.
     "ranking_slice": [
-        ("0", "0",   215, 118),   # title/header bar across the top
+        ("0", "0",   "iw", 118),  # title/header bar — full width
         ("0", "118", 215, 1800),  # left-side rank number panel
     ],
     "unknown": [
@@ -898,11 +898,11 @@ def _render_with_remotion(
                     on_progress(f"Clip {i + 1} empty after processing: {dest.name}")
                 return None
 
-            # Use the actual clip duration so Remotion never shows black frames
-            # at the end of a clip that is shorter than clip_duration.
+            # Use Gemini-detected clip duration exactly so output timing mirrors
+            # the source video. Cap at 59 s to stay within Shorts limits.
             actual_dur = _probe_duration(dest)
             if actual_dur and actual_dur > 0:
-                dur_frames = min(int(round(actual_dur * fps)), clip_dur_frames)
+                dur_frames = min(int(round(actual_dur * fps)), 59 * fps)
             else:
                 dur_frames = clip_dur_frames
             total_frames_actual += dur_frames

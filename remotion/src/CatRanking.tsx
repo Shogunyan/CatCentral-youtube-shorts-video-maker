@@ -52,8 +52,8 @@ export interface CatRankingProps {
 
 // ─── Design constants ─────────────────────────────────────────────────────────
 
-const GOLD      = '#FFD700';
-const WHITE     = '#FFFFFF';
+const GOLD      = '#FFFFFF';   // swapped: rank numbers are white
+const WHITE     = '#FFD700';   // swapped: labels are gold
 const DIM       = 'rgba(255,255,255,0.50)';
 const VERY_DIM  = 'rgba(255,255,255,0.22)';
 const RED_BADGE = 'rgba(238,17,17,0.88)';

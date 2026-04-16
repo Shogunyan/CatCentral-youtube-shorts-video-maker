@@ -88,7 +88,7 @@ class Pipeline:
         self._report(4, "✏  Theme picked", f"Title: {title}")
 
         self._report(5, "🔍  Scraping viral cat videos…",
-                     "Searching for 200K+ view cat ranking Shorts…")
+                     "Searching for 50K+ view cat ranking Shorts to clone…")
         candidates = self.scraper.get_candidates(want=n * 5)
         if not candidates:
             self._report(5, "❌  Scraping failed",
@@ -134,7 +134,8 @@ class Pipeline:
             logger.info(f"Proceeding with {len(downloaded)}/{n} clips (minimum is {min_clips})")
 
         downloaded = downloaded[:n]
-        random.shuffle(downloaded)
+        # Do NOT shuffle — clips are returned in original video order
+        # (rank 5 first → rank 1 last) so the output mirrors the source.
         clip_paths = [p for _, p in downloaded]
         clip_platforms = [m.get("platform", "unknown") for m, _ in downloaded]
         used_metas = [m for m, _ in downloaded]
