@@ -11,7 +11,7 @@
  *   • Outro: all ranks light up gold for 1.5 s at the end of the last clip
  *   • Moving watermark (corner rotation every 12 s)
  *   • Like & Subscribe badge (first clip, 3–6 s, fade in/out)
- *   • Woosh SFX at the start of every clip (if available)
+ *   • Ding SFX at the start of every clip (rank-reveal bell sound)
  */
 
 import React from 'react';
@@ -45,7 +45,7 @@ export interface CatRankingProps {
   title: string;
   watermark: string;
   totalFrames: number;
-  hasWoosh: boolean;
+  hasDing: boolean;
   /** Show 3-2-1 countdown overlay at the start of the #1 reveal clip */
   hasCountdown?: boolean;
 }
@@ -165,9 +165,9 @@ const ClipView: React.FC<{
   watermark:    string;
   isFirst:      boolean;
   isLast:       boolean;
-  hasWoosh:     boolean;
+  hasDing:      boolean;
   hasCountdown: boolean;
-}> = ({clip, allClips, idx, title, watermark, isFirst, isLast, hasWoosh, hasCountdown}) => {
+}> = ({clip, allClips, idx, title, watermark, isFirst, isLast, hasDing, hasCountdown}) => {
   const frame      = useCurrentFrame();
   const {fps}      = useVideoConfig();
   const n          = allClips.length;
@@ -221,9 +221,9 @@ const ClipView: React.FC<{
         style={{width:'100%', height:'100%', objectFit:'cover', objectPosition:'center'}}
       />
 
-      {/* ── Whoosh SFX ───────────────────────────────────────────────────── */}
-      {hasWoosh && (
-        <Audio src={staticFile('sfx/woosh.mp3')} volume={2} startFrom={0} endAt={Math.round(0.7 * fps)} />
+      {/* ── Ding SFX (rank-reveal bell at the start of each clip) ───────── */}
+      {hasDing && (
+        <Audio src={staticFile('sfx/ding.mp3')} volume={0.8} startFrom={0} endAt={Math.round(0.8 * fps)} />
       )}
 
       {/* ── Title bar ────────────────────────────────────────────────────── */}
@@ -346,7 +346,7 @@ const ClipView: React.FC<{
 // ─── Root composition ──────────────────────────────────────────────────────────
 
 export const CatRanking: React.FC<CatRankingProps> = ({
-  clips, title, watermark, hasWoosh, hasCountdown = false,
+  clips, title, watermark, hasDing, hasCountdown = false,
 }) => {
   let offset = 0;
   return (
@@ -364,7 +364,7 @@ export const CatRanking: React.FC<CatRankingProps> = ({
               watermark={watermark}
               isFirst={idx === 0}
               isLast={idx === clips.length - 1}
-              hasWoosh={hasWoosh}
+              hasDing={hasDing}
               hasCountdown={hasCountdown}
             />
           </Sequence>

@@ -13,7 +13,7 @@ const defaultProps: CatRankingProps = {
   title: 'Funniest Cat Moments Ranked',
   watermark: '@CatCentral',
   totalFrames: 3750,
-  hasWoosh: false,
+  hasDing: false,
 };
 
 export const RemotionRoot: React.FC = () => {

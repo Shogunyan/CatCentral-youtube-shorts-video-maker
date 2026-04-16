@@ -1016,13 +1016,13 @@ class VideoScraper:
                 if self._is_used(clip_id) or clip_id in seen_ids:
                     continue
                 seen_ids.add(clip_id)
-                # Give each segment a unique positional label so the rank
-                # sidebar shows "SCENE 1", "SCENE 2", … instead of every clip
-                # showing the identical compilation title.
+                # Leave title blank — _make_short_label will assign a fun
+                # rank-appropriate label (e.g. "THE GOAT", "SEND HELP") based
+                # on the clip's position when the video is assembled.
                 clips.append({
                     "id":              clip_id,
                     "url":             rv["url"],
-                    "title":           f"scene {i + 1}",
+                    "title":           "",
                     "start_time":      start,
                     "end_time":        end,
                     "platform":        "ranking_slice",

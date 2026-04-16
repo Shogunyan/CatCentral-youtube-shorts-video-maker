@@ -89,52 +89,54 @@ _FONT_P = f":fontfile={FONT_PLAIN}"  if FONT_PLAIN  else ""
 
 # ── Sound effects ─────────────────────────────────────────────────────────────
 
-_WOOSH_PATH = Path(__file__).parent.parent / "assets" / "sfx" / "woosh.mp3"
+_DING_PATH = Path(__file__).parent.parent / "assets" / "sfx" / "ding.mp3"
+
+_DING_VERSION = 1   # bump to force regeneration when synthesis changes
 
 
-_WOOSH_VERSION = 2   # bump to force regeneration when synthesis changes
+def _get_ding() -> Path | None:
+    """
+    Return path to the rank-reveal ding sound, generating it if needed.
 
-
-def _get_woosh() -> Path | None:
-    """Return path to the woosh sound, generating it with ffmpeg if needed."""
-    ver_file = _WOOSH_PATH.with_suffix(".ver")
+    Generates a bright bell-like ding (880 Hz + 1760 Hz octave harmonic)
+    with a quick attack and smooth decay — the same style used by viral
+    Reddit-story and ranking YouTube channels.
+    """
+    ver_file = _DING_PATH.with_suffix(".ver")
     needs_regen = (
-        not _WOOSH_PATH.exists()
+        not _DING_PATH.exists()
         or not ver_file.exists()
-        or ver_file.read_text().strip() != str(_WOOSH_VERSION)
+        or ver_file.read_text().strip() != str(_DING_VERSION)
     )
     if not needs_regen:
-        return _WOOSH_PATH
+        return _DING_PATH
     try:
-        _WOOSH_PATH.parent.mkdir(parents=True, exist_ok=True)
-        # Airy whoosh: pink noise band-passed to the 500–3500 Hz "wind" range,
-        # amplitude-shaped with a sharp attack and a long tail.
-        # The two-stage bandpass removes the harsh high end and the rumbling low
-        # end, leaving the breezy mid-range characteristic of a real whoosh SFX.
+        _DING_PATH.parent.mkdir(parents=True, exist_ok=True)
+        # Bell ding: mix 880 Hz (fundamental) + 1760 Hz (octave) sine waves,
+        # fast attack (10 ms), smooth decay over 0.6 s → bright notification ding.
         subprocess.run(
             [
                 "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                "-f", "lavfi",
-                "-i", "anoisesrc=color=pink:duration=0.7:seed=7",
-                "-af", (
-                    "highpass=f=500,"
-                    "lowpass=f=3500,"
-                    "afade=t=in:d=0.04,"
-                    "afade=t=out:st=0.50:d=0.20,"
-                    "volume=5.0"
+                "-f", "lavfi", "-i", "sine=frequency=880:duration=0.8",
+                "-f", "lavfi", "-i", "sine=frequency=1760:duration=0.8",
+                "-filter_complex",
+                (
+                    "[0][1]amix=inputs=2:weights=1 0.4,"
+                    "afade=t=in:d=0.01,"
+                    "afade=t=out:st=0.25:d=0.55,"
+                    "volume=3.0"
                 ),
-                "-ar", "44100",
-                "-ac", "2",
-                str(_WOOSH_PATH),
+                "-ar", "44100", "-ac", "2",
+                str(_DING_PATH),
             ],
             check=True,
             capture_output=True,
         )
-        ver_file.write_text(str(_WOOSH_VERSION))
-        logger.info(f"Generated woosh SFX (v{_WOOSH_VERSION}) → {_WOOSH_PATH}")
-        return _WOOSH_PATH
+        ver_file.write_text(str(_DING_VERSION))
+        logger.info(f"Generated ding SFX (v{_DING_VERSION}) → {_DING_PATH}")
+        return _DING_PATH
     except Exception as e:
-        logger.warning(f"Could not generate woosh sound: {e}")
+        logger.warning(f"Could not generate ding sound: {e}")
         return None
 
 
@@ -168,45 +170,50 @@ def _probe_duration(path: Path) -> float:
         return 0.0
 
 
-def _add_woosh_to_clip(
-    video_path: Path,
-    woosh_path: Path,
-    output_path: Path,
-) -> Path:
-    """
-    Mix a woosh sound effect at the very start of a clip.
-    Handles clips that have no original audio track.
-    """
-    if _has_audio(video_path):
-        audio_fc = (
-            "[0:a]volume=1.0[orig];"
-            "[1:a]volume=2.0[w];"
-            "[orig][w]amix=inputs=2:duration=first:normalize=0[a]"
-        )
-    else:
-        audio_fc = "[1:a]volume=2.0[a]"
-
-    _ffmpeg(
-        "-i", str(video_path),
-        "-i", str(woosh_path),
-        "-filter_complex", audio_fc,
-        "-map", "0:v",
-        "-map", "[a]",
-        "-c:v", "copy",
-        "-c:a", AUDIO_CODEC,
-        "-b:a", AUDIO_BITRATE,
-        "-ar", "44100",
-        "-ac", "2",
-        str(output_path),
-    )
-    return output_path
-
-
 # ── Ranking overlay ───────────────────────────────────────────────────────────
 
-def _make_short_label(title: str) -> str:
-    """Turn a clip title into a 2-word ALL-CAPS sidebar label."""
-    # Strip hashtags, URLs, numbers at the start, and punctuation
+
+# Fun clip labels used when the source title is generic (e.g. even-sliced clips).
+# Indexed by rank position (0 = rank 1 / best clip, 4 = rank 5 / worst).
+_RANK_LABELS = [
+    # rank 1 — best
+    ["THE GOAT", "UNREAL", "FINAL BOSS", "CERTIFIED", "PEAK CAT"],
+    # rank 2
+    ["SO CLOSE", "ALMOST", "RUNNER UP", "NOT BAD", "TOP TIER"],
+    # rank 3
+    ["SOLID 3", "MID CHAOS", "DECENT", "PRETTY WILD", "NO NOTES"],
+    # rank 4
+    ["BARELY", "LUCKY", "JUST MADE IT", "MAIN EVENT", "PLOT TWIST"],
+    # rank 5 — worst (shown first)
+    ["LAST PLACE", "STARTING OFF", "WARM UP", "ENTRY LEVEL", "SEND HELP"],
+]
+
+
+def _make_short_label(title: str, rank: int = 0, n_clips: int = 5) -> str:
+    """
+    Turn a clip title into a 2-word ALL-CAPS sidebar label.
+    Falls back to a fun rank-appropriate label when the title is generic.
+    rank=1 means best clip, rank=n_clips means worst/first shown.
+    """
+    # Detect generic "scene X" titles from even-slicing and blank titles
+    clean = title.strip().lower()
+    is_generic = (
+        not clean
+        or re.match(r'^scene\s*\d+$', clean)
+        or re.match(r'^clip\s*\d+$', clean)
+        or clean in {"untitled", "cat", "cats", "video", "clip"}
+    )
+    if is_generic:
+        # rank 1 = best = last clip shown → index 0 in _RANK_LABELS
+        # rank n = worst = first clip shown → index 4
+        slot = max(0, min(4, n_clips - rank))
+        pool = _RANK_LABELS[slot]
+        # Deterministic pick per title string so the same clip always gets same label
+        import hashlib
+        idx = int(hashlib.md5(title.encode()).hexdigest(), 16) % len(pool)
+        return pool[idx]
+
+    # Strip hashtags, URLs, leading punctuation
     label = re.sub(r"#\w+", "", title).strip()
     label = re.sub(r"https?://\S+", "", label).strip()
     label = re.sub(r"^\W+", "", label).strip()
@@ -219,7 +226,6 @@ def _make_short_label(title: str) -> str:
     words = [w for w in label.split() if w.lower() not in FILLER]
     if not words:
         words = label.split()   # fallback: use any words
-    # Two words max
     chosen = " ".join(words[:2])
     return chosen[:14].upper() or "CAT CLIP"
 
@@ -831,16 +837,16 @@ def _render_with_remotion(
     clips_public      = _REMOTION_DIR / "public" / "clips" / session_id
     clips_public.mkdir(parents=True, exist_ok=True)
 
-    # Expose woosh SFX to Remotion's static server
-    woosh_src  = _REMOTION_DIR.parent / "assets" / "sfx" / "woosh.mp3"
+    # Expose ding SFX to Remotion's static server (generate if missing)
     sfx_public = _REMOTION_DIR / "public" / "sfx"
-    has_woosh  = False
-    if woosh_src.exists():
-        sfx_public.mkdir(parents=True, exist_ok=True)
-        sfx_dest = sfx_public / "woosh.mp3"
+    sfx_public.mkdir(parents=True, exist_ok=True)
+    has_ding   = False
+    ding_src   = _get_ding()
+    if ding_src and ding_src.exists():
+        sfx_dest = sfx_public / "ding.mp3"
         if not sfx_dest.exists():
-            shutil.copy2(woosh_src, sfx_dest)
-        has_woosh = sfx_dest.exists()
+            shutil.copy2(ding_src, sfx_dest)
+        has_ding = sfx_dest.exists()
 
     props_file = _REMOTION_DIR / f"_props_{session_id}.json"
 
@@ -901,10 +907,11 @@ def _render_with_remotion(
                 dur_frames = clip_dur_frames
             total_frames_actual += dur_frames
 
+            clip_rank = n - i   # rank 1 = best (last shown), rank n = first shown
             clip_refs.append({
                 "path":           f"{session_id}/{dest_name}",
-                "rank":           n - i,
-                "label":          _make_short_label(label),
+                "rank":           clip_rank,
+                "label":          _make_short_label(label, rank=clip_rank, n_clips=n),
                 "durationFrames": dur_frames,
                 "viralScore":     scores[i] if i < len(scores) else 0,
             })
@@ -917,7 +924,7 @@ def _render_with_remotion(
             "title":        title,
             "watermark":    getattr(config, "watermark_text", "@CatCentral"),
             "totalFrames":  total_frames_actual,
-            "hasWoosh":     has_woosh,
+            "hasDing":      has_ding,
             "hasCountdown": has_countdown,
         }
         props_file.write_text(_json.dumps(props))
