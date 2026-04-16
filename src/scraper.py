@@ -698,86 +698,98 @@ class VideoScraper:
         api_key: str,
     ) -> list[dict]:
         """
-        Send multiple frames from a ranking video to Gemini in ONE call.
+        Watch a ranking video frame-by-frame and detect exactly where each
+        ranked cat segment starts and ends, by identifying visual rank
+        indicators (on-screen numbers, title cards, overlays).
 
-        Gemini identifies each individual cat clip and returns structured data:
-            start_time, end_time          — precise timestamps in the ranking video
-            description                   — what the cat is doing (for logging)
-            search_query                  — YouTube search to find the original clip
-            is_real_cat / is_animated     — content filters
-            view_count_estimate (1-5)     — how viral Gemini thinks this clip is
-            confidence (1-10)             — timestamp accuracy confidence
-
-        High-confidence clips (≥6) are sliced directly; lower confidence clips
-        use search_query to find the original standalone video.
+        Dense frame sampling (1 frame per ~5 s) lets Gemini see the actual
+        rank numbers change on screen.  Chapter markers are supplied as
+        anchors when available.  The returned segments are contiguous —
+        end_time[N] == start_time[N+1] — so downloads cover the full clip
+        without gaps or overlaps.
         """
         try:
             import json as _json
 
-            n_frames = min(10, max(4, int(rv_duration / 8)))
+            # Dense sampling: ~1 frame every 5 s, capped at 30 frames.
+            # Enough to see rank-number changes even in 2-3 min compilations.
+            n_frames = min(30, max(8, int(rv_duration / 5)))
             logger.info(
                 f"    Gemini: extracting {n_frames} frames from "
-                f"{rv_duration:.0f}s ranking video…"
+                f"{rv_duration:.0f}s video to detect rank transitions…"
             )
             frame_data = self._extract_frames_for_analysis(rv_url, rv_duration, n_frames)
             if not frame_data:
                 logger.debug("    Gemini: no frames extracted")
                 return []
 
-            # Give Gemini the chapter marker context so it can correlate clip
-            # boundaries to exact timestamps more accurately.
-            _CH_NUM_RE = re.compile(r"^#?\d+[\.\-:\s]+")
+            # Chapter markers as anchor hints
             chapter_hint = ""
             if chapters:
                 ch_str = "; ".join(
-                    f"#{i+1} '{_CH_NUM_RE.sub('', ch.get('title', '').strip())}'"
-                    f" @{ch.get('start_time', 0):.0f}s"
-                    for i, ch in enumerate(chapters[:12])
+                    f"@{ch.get('start_time', 0):.0f}s '{(ch.get('title') or '').strip()}'"
+                    for ch in chapters[:12]
                 )
-                chapter_hint = f"\nChapter markers (use these to anchor boundaries): {ch_str}"
+                chapter_hint = (
+                    f"\nChapter anchors (use to verify your transition timestamps): {ch_str}"
+                )
+
+            frame_list = ", ".join(f"{t:.1f}s" for t, _ in frame_data)
+            dur_s = str(int(rv_duration))
 
             prompt_parts: list = [
-                f"You are analyzing a YouTube cat ranking/countdown video ({rv_duration:.0f}s long)."
+                f"You are watching a YouTube cat ranking video ({rv_duration:.0f}s long) "
+                f"that plays cat clips from worst (rank 5) to best (rank 1)."
                 f"{chapter_hint}\n\n"
-                f"I am providing {len(frame_data)} frames at these timestamps: "
-                f"{', '.join(f'{t:.1f}s' for t, _ in frame_data)}\n\n"
-                "Identify EACH individual cat clip shown in this ranking video.\n"
-                "For EACH clip return a JSON object with these exact fields:\n"
-                "  start_time: integer seconds from video start (clip begins here)\n"
-                "  end_time: integer seconds from video start (clip ends here)\n"
-                "  description: 10-20 word description of the cat's specific action/reaction\n"
-                "  search_query: 4-8 word YouTube search to find the ORIGINAL standalone clip\n"
-                "  is_real_cat: true only if a LIVE REAL cat (not animated, CGI, or Zoom/camera filter)\n"
-                "  is_animated: true if cartoon, animation, or CGI\n"
-                "  is_ai_generated: true if this footage appears to be AI-generated video (e.g. Sora, Kling, Runway, Pika, or any AI video generator) — signs include: unnaturally smooth motion, slightly-off anatomy, dreamlike or fluid background, texture inconsistencies, or if the video style looks AI-rendered even if it tries to look realistic\n"
-                "  is_english: true if any on-screen text is English, or no text is visible\n"
-                "  is_cat_primary_subject: true only if the cat is the MAIN focus and occupies the majority of screen attention (NOT a human editing video software, NOT a reaction clip, NOT the cat barely visible in background)\n"
-                "  is_screen_recording: true if this frame shows video editing software, a desktop screen recording, someone editing audio/video, or any meta-content about video creation\n"
-                "  view_count_estimate: 1=unknown 2=low 3=medium 4=high 5=extremely viral\n"
-                "  confidence: 1-10 confidence in the timestamp accuracy\n\n"
-                "Rules:\n"
-                "- EXCLUDE any clip where is_real_cat is false or is_animated is true\n"
-                "- EXCLUDE any clip where is_ai_generated is true — we ONLY want authentic recorded footage\n"
-                "- EXCLUDE any clip where is_cat_primary_subject is false\n"
-                "- EXCLUDE any clip where is_screen_recording is true\n"
-                "- EXCLUDE clips that appear to be a human using a cat filter (Zoom, Snapchat, etc.)\n"
-                "- Timestamps must be within 0 and " + str(int(rv_duration)) + "s\n"
-                "- Each clip must be at least 3 seconds long\n"
+                f"Frames sampled at: {frame_list}\n\n"
+                "TASK: Identify the exact start and end time of each ranked cat segment "
+                "by detecting when the rank NUMBER changes on screen.\n\n"
+                "HOW TO SPOT RANK TRANSITIONS:\n"
+                "• On-screen rank indicators: '5', '#5', 'No.5', 'Rank 5', big countdown "
+                "numbers, title-card text showing the rank position\n"
+                "• Visual cuts/fades/wipes between two different cat clips\n"
+                "• A transition frame (black screen, flash, animated whoosh) signals "
+                "the boundary between ranks\n"
+                "• Rank goes HIGH → LOW: first segment is rank 5 (worst), last is rank 1 (best)\n\n"
+                "For EACH rank segment return one JSON object:\n"
+                "  start_time: integer seconds — when THIS rank's clip begins\n"
+                "  end_time: integer seconds — when THIS rank's clip ends "
+                "(= start of NEXT rank, or video end)\n"
+                "  rank: integer rank number shown (5=first/worst … 1=last/best)\n"
+                "  description: 8-16 word description of what the cat does\n"
+                "  is_real_cat: true only if a LIVE real cat (not animated, CGI, "
+                "Zoom filter, or AI-generated)\n"
+                "  is_animated: true if cartoon / CGI / animation\n"
+                "  is_ai_generated: true if footage looks AI-generated "
+                "(Sora, Kling, Runway, Pika — unnatural motion, dreamlike textures)\n"
+                "  is_english: true if on-screen text is English or no text is visible\n"
+                "  confidence: 1-10 how sure you are of the start_time / end_time\n\n"
+                "STRICT RULES:\n"
+                "• Segments must be CONTIGUOUS: end_time[N] == start_time[N+1]\n"
+                "• NO overlaps, NO gaps between segments\n"
+                "• First segment's start_time should be 0 (or just after any intro)\n"
+                "• Last segment's end_time should be " + dur_s + " (or just before outro)\n"
+                "• Each segment must be ≥ 3 seconds long\n"
+                "• Timestamps must be between 0 and " + dur_s + "\n"
+                "• Return segments in chronological order (rank 5 first → rank 1 last)\n"
+                "• EXCLUDE segments where is_real_cat=false, is_animated=true, "
+                "or is_ai_generated=true\n"
                 "Reply ONLY with a valid JSON array — no markdown, no extra text.\n"
-                'Example: [{"start_time":0,"end_time":18,'
-                '"description":"orange tabby slides off leather couch in slow motion",'
-                '"search_query":"cat slides off couch funny original",'
-                '"is_real_cat":true,"is_animated":false,"is_english":true,'
-                '"is_cat_primary_subject":true,"is_screen_recording":false,'
-                '"view_count_estimate":4,"confidence":8}]\n',
+                'Example (5-clip ranking, 60 s video):\n'
+                '[{"start_time":0,"end_time":11,"rank":5,'
+                '"description":"orange tabby slides off kitchen counter",'
+                '"is_real_cat":true,"is_animated":false,"is_ai_generated":false,'
+                '"is_english":true,"confidence":9},\n'
+                ' {"start_time":11,"end_time":23,"rank":4,'
+                '"description":"kitten terrified by cucumber on floor",'
+                '"is_real_cat":true,"is_animated":false,"is_ai_generated":false,'
+                '"is_english":true,"confidence":8}]\n',
             ]
             for ts, frame_bytes in frame_data:
                 prompt_parts.append(f"\n[Frame at {ts:.1f}s]:")
                 prompt_parts.append({"mime_type": "image/jpeg", "data": frame_bytes})
 
             raw = _gemini_generate(api_key, "gemini-2.0-flash", prompt_parts).strip()
-            # Strip markdown fences then find the first JSON array — Gemini
-            # sometimes prefixes the array with a sentence of prose.
             raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.MULTILINE)
             raw = re.sub(r"\s*```\s*$",        "", raw, flags=re.MULTILINE)
             bracket = raw.find("[")
@@ -794,43 +806,53 @@ class VideoScraper:
             for item in clips_raw:
                 if not isinstance(item, dict):
                     continue
-                # Hard content filter — drop AI-generated, animated, non-real-cat, and meta clips
-                if item.get("is_animated", False):
-                    continue
-                if item.get("is_ai_generated", False):
+                # Content filters
+                if item.get("is_animated", False) or item.get("is_ai_generated", False):
                     continue
                 if not item.get("is_real_cat", True):
                     continue
-                if not item.get("is_cat_primary_subject", True):
-                    continue
-                if item.get("is_screen_recording", False):
+                if not item.get("is_english", True):
                     continue
                 start = float(item.get("start_time", 0))
-                end   = float(item.get("end_time", start + SEGMENT_TARGET_SECS))
+                end   = float(item.get("end_time", start + 20))
                 if end <= start or (end - start) < 3:
                     continue
-                # Clamp to video bounds
                 start = max(0.0, min(start, rv_duration))
                 end   = min(end, rv_duration)
                 valid.append({
-                    "start_time":             start,
-                    "end_time":               end,
-                    "description":            str(item.get("description", ""))[:120],
-                    "search_query":           str(item.get("search_query", ""))[:80],
-                    "is_real_cat":            bool(item.get("is_real_cat", True)),
-                    "is_animated":            bool(item.get("is_animated", False)),
-                    "is_ai_generated":        bool(item.get("is_ai_generated", False)),
-                    "is_english":             bool(item.get("is_english", True)),
-                    "is_cat_primary_subject": bool(item.get("is_cat_primary_subject", True)),
-                    "is_screen_recording":    bool(item.get("is_screen_recording", False)),
-                    "view_count_estimate":    int(item.get("view_count_estimate", 1)),
-                    "confidence":             int(item.get("confidence", 5)),
+                    "start_time":          start,
+                    "end_time":            end,
+                    "rank":                int(item.get("rank", 0)),
+                    "description":         str(item.get("description", ""))[:120],
+                    "is_real_cat":         bool(item.get("is_real_cat", True)),
+                    "is_animated":         bool(item.get("is_animated", False)),
+                    "is_ai_generated":     bool(item.get("is_ai_generated", False)),
+                    "is_english":          bool(item.get("is_english", True)),
+                    "confidence":          int(item.get("confidence", 5)),
+                    "view_count_estimate": int(item.get("view_count_estimate", 3)),
                 })
 
-            # Best clips first: highest confidence, then most viral estimate
-            valid.sort(key=lambda x: (-x["confidence"], -x["view_count_estimate"]))
+            # Sort chronologically so segments are in play order
+            valid.sort(key=lambda x: x["start_time"])
+
+            # Fix overlaps and tiny gaps to make segments contiguous
+            for i in range(len(valid) - 1):
+                cur_end  = valid[i]["end_time"]
+                nxt_start = valid[i + 1]["start_time"]
+                if cur_end > nxt_start:
+                    # Overlap: trim this segment at the next one's start
+                    valid[i]["end_time"] = nxt_start
+                elif nxt_start - cur_end < 2:
+                    # Tiny gap (< 2 s): extend this segment to cover it
+                    valid[i]["end_time"] = nxt_start
+
+            # Drop anything that became too short after overlap correction
+            valid = [c for c in valid if (c["end_time"] - c["start_time"]) >= 3]
+
+            total_span = sum(c["end_time"] - c["start_time"] for c in valid)
             logger.info(
-                f"    Gemini Vision: identified {len(valid)} valid real-cat clips"
+                f"    Gemini Vision: {len(valid)} rank segments detected, "
+                f"spanning {total_span:.0f}s of {rv_duration:.0f}s total"
             )
             return valid
 
@@ -953,7 +975,7 @@ class VideoScraper:
                         "url":                rv["url"],
                         "title":              gc["description"][:60] or rv["title"][:30],
                         "start_time":         start,
-                        "end_time":           min(end, start + SEGMENT_TARGET_SECS),
+                        "end_time":           end,  # use Gemini's detected rank transition boundary exactly
                         "platform":           "ranking_slice",
                         "view_count":         rv_views,
                         "like_count":         0,
@@ -977,9 +999,9 @@ class VideoScraper:
                 if rv_duration and start >= rv_duration:
                     continue
                 seg_len = end - start
-                if seg_len < 3 or seg_len > 60:
+                if seg_len < 3 or seg_len > 300:
                     continue
-                if start < last_end + 10:
+                if start < last_end + 1:
                     continue
                 last_end = end
                 clip_id  = f"{rv_id}_{int(start)}"
@@ -995,7 +1017,7 @@ class VideoScraper:
                     "url":             rv["url"],
                     "title":           label or rv["title"][:40],
                     "start_time":      start,
-                    "end_time":        min(end, start + SEGMENT_TARGET_SECS),
+                    "end_time":        end,  # use chapter boundary exactly
                     "platform":        "ranking_slice",
                     "view_count":      rv_views,
                     "like_count":      0,
