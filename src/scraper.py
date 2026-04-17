@@ -749,6 +749,9 @@ class VideoScraper:
                 "  end_time: integer seconds — when THIS rank's clip ends "
                 "(= start of NEXT rank, or video end)\n"
                 "  rank: integer rank number shown (5=first/worst … 1=last/best)\n"
+                "  screen_label: the EXACT text label shown on screen for this rank "
+                "(e.g. '#5 WORST CAT', 'Rank 3', '2. ALMOST') — copy it verbatim, "
+                "empty string if no text label is visible\n"
                 "  description: 8-16 word description of what the cat does\n"
                 "  is_real_cat: true only if a LIVE real cat (not animated, CGI, "
                 "Zoom filter, or AI-generated)\n"
@@ -816,6 +819,7 @@ class VideoScraper:
                     "start_time":          start,
                     "end_time":            end,
                     "rank":                int(item.get("rank", 0)),
+                    "screen_label":        str(item.get("screen_label", "")).strip()[:40],
                     "description":         str(item.get("description", ""))[:120],
                     "is_real_cat":         bool(item.get("is_real_cat", True)),
                     "is_animated":         bool(item.get("is_animated", False)),
@@ -893,6 +897,13 @@ class VideoScraper:
                 views = e.get("view_count") or 0
                 if views < min_views:
                     continue
+                # Only clone actual YouTube Shorts (≤65 s).
+                # Long compilations (2-10 min) have ranked sections that are
+                # themselves mini-compilations — cloning them produces a video
+                # where each rank slot shows multiple clips, not one.
+                dur = e.get("duration") or 0
+                if dur and dur > 65:
+                    continue
                 seen.add(vid_id)
                 found.append({
                     "id":         vid_id,
@@ -939,6 +950,16 @@ class VideoScraper:
         rv_duration = info.get("duration") or 0
         clips: list[dict] = []
 
+        # Safety gate: if the video is a long compilation (not a Short), each
+        # "rank segment" would itself be a mini-compilation showing multiple clips.
+        # Skip it so we only clone true ranking Shorts (≤65 s).
+        if rv_duration > 65:
+            logger.info(
+                f"    Skipping: {rv_duration:.0f}s video is not a Short "
+                f"(>65 s) — each segment would contain multiple clips"
+            )
+            return []
+
         # ── Route A: Gemini Vision → direct time-range slices ────────────────
         # Gemini WATCHES the video (multi-frame) and identifies exactly where
         # each funny cat moment starts and ends. We slice those timestamps
@@ -963,10 +984,14 @@ class VideoScraper:
                     if clip_id_g in seen_ids or self._is_used(clip_id_g):
                         continue
                     seen_ids.add(clip_id_g)
+                    # Use on-screen label (if Gemini saw it) as the sidebar title;
+                    # fall back to the action description or the ranking video title.
+                    raw_screen = gc.get("screen_label", "").strip()
+                    clip_title = raw_screen or gc["description"][:60] or rv["title"][:30]
                     clips.append({
                         "id":                 clip_id_g,
                         "url":                rv["url"],
-                        "title":              gc["description"][:60] or rv["title"][:30],
+                        "title":              clip_title,
                         "start_time":         start,
                         "end_time":           end,  # use Gemini's detected rank transition boundary exactly
                         "platform":           "ranking_slice",

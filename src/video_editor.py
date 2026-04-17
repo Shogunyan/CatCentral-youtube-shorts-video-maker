@@ -173,6 +173,34 @@ def _probe_duration(path: Path) -> float:
 # ── Ranking overlay ───────────────────────────────────────────────────────────
 
 
+# Single-word swaps applied to screen labels copied from the source video.
+# Keeps the label recognisable but different enough to not be identical.
+_LABEL_SWAPS: dict[str, str] = {
+    "worst":    "last",    "best":     "top",     "funniest": "wildest",
+    "funny":    "wild",    "bad":      "mid",     "good":     "nice",
+    "top":      "peak",    "goat":     "king",    "first":    "start",
+    "last":     "end",     "rank":     "pick",    "number":   "slot",
+    "worst":    "bottom",  "winner":   "champ",   "loser":    "last",
+    "greatest": "peak",    "ultimate": "supreme", "epic":     "wild",
+    "terrible": "rough",   "amazing":  "insane",  "awful":    "rough",
+    "hilarious":"chaotic", "crazy":    "wild",    "insane":   "unreal",
+}
+
+
+def _alter_screen_label(text: str) -> str:
+    """
+    Swap one word in a verbatim screen label so our sidebar differs slightly
+    from the original video's text. Only swaps the first matching word.
+    """
+    words = text.split()
+    for i, w in enumerate(words):
+        key = w.lower().strip("#.!?,")
+        if key in _LABEL_SWAPS:
+            words[i] = _LABEL_SWAPS[key].upper()
+            break
+    return " ".join(words)
+
+
 # Fun clip labels used when the source title is generic (e.g. even-sliced clips).
 # Indexed by rank position (0 = rank 1 / best clip, 4 = rank 5 / worst).
 _RANK_LABELS = [
@@ -217,7 +245,17 @@ def _make_short_label(title: str, rank: int = 0, n_clips: int = 5) -> str:
     label = re.sub(r"#\w+", "", title).strip()
     label = re.sub(r"https?://\S+", "", label).strip()
     label = re.sub(r"^\W+", "", label).strip()
-    # Skip filler words so we surface meaningful content words
+
+    # If this is a copied screen label (short, no sentence structure), alter
+    # one word so our sidebar reads differently from the original video's text.
+    words_raw = label.split()
+    if len(words_raw) <= 4 and not any(w.lower() in {
+        "the","a","an","of","in","on","at","to","and","or","but","is","it",
+        "slides","falls","jumps","runs","yells","sits","stares","climbs",
+    } for w in words_raw):
+        return _alter_screen_label(label.upper())[:14] or "CAT CLIP"
+
+    # Long description title — skip filler words, surface content words
     FILLER = {
         "the","a","an","of","in","on","at","to","and","or","but","is","it",
         "this","that","my","your","his","her","cat","cats","kitten","funny",
@@ -225,7 +263,7 @@ def _make_short_label(title: str, rank: int = 0, n_clips: int = 5) -> str:
     }
     words = [w for w in label.split() if w.lower() not in FILLER]
     if not words:
-        words = label.split()   # fallback: use any words
+        words = label.split()
     chosen = " ".join(words[:2])
     return chosen[:14].upper() or "CAT CLIP"
 
