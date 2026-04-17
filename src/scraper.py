@@ -29,7 +29,6 @@ import subprocess
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import quote_plus
 
 import yt_dlp
 
@@ -875,18 +874,9 @@ class VideoScraper:
         for q in queries:
             if len(found) >= RANKING_ANALYSE_LIMIT * 3:
                 break
-            logger.info(f"  Searching ranking sources (Shorts only): '{q[:55]}'")
+            logger.info(f"  Searching ranking sources: '{q[:55]}'")
             try:
-                # sp=EgIYAQ%3D%3D is YouTube's built-in "Short" filter —
-                # only returns videos from the /shorts/ page, never regular uploads.
-                shorts_url = (
-                    "https://www.youtube.com/results"
-                    f"?search_query={quote_plus(q)}&sp=EgIYAQ%3D%3D"
-                )
-                entries = self._ydl_extract_flat(shorts_url, playlist_end=20)
-                if not entries:
-                    # Fallback: plain search (will still be filtered by duration + portrait)
-                    entries = self._ydl_extract_flat(f"ytsearch20:{q}", playlist_end=20)
+                entries = self._ydl_extract_flat(f"ytsearch20:{q}", playlist_end=20)
             except Exception as ex:
                 logger.debug(f"Ranking search failed '{q}': {ex}")
                 continue
