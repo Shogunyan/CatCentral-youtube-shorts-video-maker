@@ -277,12 +277,19 @@ _RANKING_WORDS = {
 # Words that disqualify a ranking video even if it mentions cats.
 # We only want PURE cat ranking videos — no mixed-animal content.
 _RANKING_REJECT = {
+    # Mixed-animal or non-cat content
     "dog", "dogs", "puppy", "puppies", "pup ",
     "hamster", "rabbit", "bird", "parrot", "horse",
     "monkey", "animal", "animals", "pet ", "pets ",
+    # Human-only content
     "people", "human", "man ", "woman ", "kid ", "baby ",
     "parking", "ticket", "story", "comedy", "standup",
     "stand up", "comedian", "podcast", "interview",
+    # Long compilations and music channels (NOT Shorts)
+    "compilation", "collection", "episodes", "episode",
+    "songs", "song", "music", "kiffness",
+    "best of", "funny moments", "funny videos",
+    "hour", "hours", "playlist",
 }
 
 
@@ -900,9 +907,12 @@ class VideoScraper:
                 # those would silently drop valid Shorts.
                 if views and views < min_views:
                     continue
-                # Do NOT filter by duration here: flat-extract often omits it,
-                # and an absent duration would incorrectly pass OR fail the check.
-                # _analyze_ranking_video does the definitive duration gate.
+                # If flat-extract gave us a duration, pre-filter obvious non-Shorts.
+                # (Flat-extract often returns 0/None so we can't rely on it fully —
+                # _analyze_ranking_video does the definitive gate.)
+                flat_dur = e.get("duration") or 0
+                if flat_dur and flat_dur > 180:
+                    continue
                 seen.add(vid_id)
                 found.append({
                     "id":         vid_id,
@@ -941,6 +951,7 @@ class VideoScraper:
         )
         info = self._ydl_get_info(rv["url"])
         if not info:
+            logger.info(f"    Skipping {rv['id']}: could not fetch metadata (unavailable or rate-limited)")
             return []
 
         rv_id       = rv["id"]
@@ -958,6 +969,7 @@ class VideoScraper:
         if rv_duration > 65:
             logger.info(f"    Skipping {rv['id']}: {rv_duration:.0f}s > 65s — not a Short")
             return []
+        logger.info(f"    Source Short confirmed: {rv_duration:.0f}s — proceeding with analysis")
 
         # ── Route A: Gemini Vision → direct time-range slices ────────────────
         # Gemini WATCHES the video (multi-frame) and identifies exactly where
@@ -1143,8 +1155,12 @@ class VideoScraper:
             logger.info("  No clips — trying next ranking video…")
 
         if not clips:
-            logger.warning("No clips extracted — falling back to reusable pool")
-            return self._get_reusable_candidates()[:want]
+            logger.warning(
+                "No clips extracted from any ranking video — "
+                "all were too long, unavailable, or failed analysis. "
+                "Pipeline will abort; no fallback to old clips."
+            )
+            return []
 
         # Preserve original video order: sort by start_time so clip sequence
         # mirrors the source video (rank 5 first → rank 1 last).
