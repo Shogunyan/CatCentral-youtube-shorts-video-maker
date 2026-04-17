@@ -895,15 +895,14 @@ class VideoScraper:
                 if not _is_ranking_video(title):
                     continue
                 views = e.get("view_count") or 0
-                if views < min_views:
+                # Only filter by views when yt-dlp actually returned a count.
+                # Flat-extract often returns 0/None for view_count — skipping
+                # those would silently drop valid Shorts.
+                if views and views < min_views:
                     continue
-                # Only clone actual YouTube Shorts (≤65 s).
-                # Long compilations (2-10 min) have ranked sections that are
-                # themselves mini-compilations — cloning them produces a video
-                # where each rank slot shows multiple clips, not one.
-                dur = e.get("duration") or 0
-                if dur and dur > 65:
-                    continue
+                # Do NOT filter by duration here: flat-extract often omits it,
+                # and an absent duration would incorrectly pass OR fail the check.
+                # _analyze_ranking_video does the definitive duration gate.
                 seen.add(vid_id)
                 found.append({
                     "id":         vid_id,
@@ -950,22 +949,12 @@ class VideoScraper:
         rv_duration = info.get("duration") or 0
         clips: list[dict] = []
 
-        # Hard gate: only clone actual YouTube Shorts.
-        # Shorts are always ≤60 s AND portrait (9:16). Regular compilation
-        # uploads are landscape (16:9) and/or longer than 60 s. Cloning them
-        # produces a video where each rank slot shows multiple clips, not one.
+        # Duration gate: skip long-form compilation videos (>65 s).
+        # Shorts are ≤60 s; anything longer has ranked sections that are
+        # themselves mini-compilations, producing multiple clips per rank slot.
         if rv_duration > 65:
             logger.info(
-                f"    Skipping {rv['id']}: {rv_duration:.0f}s — longer than 65s, not a Short"
-            )
-            return []
-
-        vw = info.get("width") or 0
-        vh = info.get("height") or 0
-        if vw and vh and vw >= vh:
-            logger.info(
-                f"    Skipping {rv['id']}: {vw}×{vh} landscape — "
-                "regular upload, not a Short"
+                f"    Skipping {rv['id']}: {rv_duration:.0f}s > 65s — not a Short"
             )
             return []
 
@@ -1138,7 +1127,7 @@ class VideoScraper:
         # Try in view-count order until one yields clips (Gemini can fail on
         # private / geo-blocked / deleted videos).
         clips: list[dict] = []
-        for rv in ranking_vids[:5]:
+        for rv in ranking_vids[:RANKING_ANALYSE_LIMIT]:
             seen_ids.add(rv["id"])
             logger.info(
                 f"Cloning: '{rv['title'][:60]}' ({rv['view_count']:,} views)"
