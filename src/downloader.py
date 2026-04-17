@@ -164,8 +164,19 @@ class Downloader:
 
         existing = self._find_existing(vid_id)
         if existing:
-            logger.debug(f"Already downloaded: {existing.name}")
-            return existing
+            # Verify cached file matches the expected segment length.
+            # Stale files from a previous bad run could be far too long.
+            expected = end - start
+            cached_dur = self._probe_duration(existing)
+            if cached_dur and expected > 3 and abs(cached_dur - expected) > 8:
+                logger.info(
+                    f"  Cached {existing.name} is {cached_dur:.1f}s "
+                    f"but expected ~{expected:.1f}s — re-downloading"
+                )
+                self._cleanup(vid_id)
+            else:
+                logger.debug(f"Already downloaded: {existing.name}")
+                return existing
 
         out_template = str(self.out_dir / f"{vid_id}.%(ext)s")
         opts = self._build_ydl_opts(platform, out_template)
