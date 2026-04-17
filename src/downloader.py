@@ -157,39 +157,128 @@ class Downloader:
     def _download_segment(
         self, video: dict, start: float, end: float
     ) -> Path | None:
-        """Download a specific time range (segment) from a longer video."""
-        platform = video.get("platform", "youtube")
-        url = video["url"]
-        vid_id = self._sanitize_id(video["id"])
+        """Download a specific time range (segment) from a longer video.
 
+        For ranking_slice clips (all 5 clips come from the same source Short)
+        we download the full source once and cut with ffmpeg — this is faster
+        and avoids yt-dlp download_ranges producing incorrectly-long files.
+        """
+        platform = video.get("platform", "youtube")
+        url      = video["url"]
+        vid_id   = self._sanitize_id(video["id"])
+
+        # ── Fast path: segment already cached with correct duration ───────────
         existing = self._find_existing(vid_id)
         if existing:
-            # Verify cached file matches the expected segment length.
-            # Stale files from a previous bad run could be far too long.
-            expected = end - start
+            expected   = end - start
             cached_dur = self._probe_duration(existing)
             if cached_dur and expected > 3 and abs(cached_dur - expected) > 8:
                 logger.info(
                     f"  Cached {existing.name} is {cached_dur:.1f}s "
-                    f"but expected ~{expected:.1f}s — re-downloading"
+                    f"but expected ~{expected:.1f}s — re-cutting"
                 )
                 self._cleanup(vid_id)
             else:
                 logger.debug(f"Already downloaded: {existing.name}")
                 return existing
 
+        # ── Ranking slices: download full source once, cut with ffmpeg ────────
+        if platform == "ranking_slice":
+            return self._cut_ranking_slice(video, vid_id, url, start, end)
+
+        # ── Generic path: use yt-dlp download_ranges ─────────────────────────
+        return self._download_range_ytdlp(video, vid_id, url, platform, start, end)
+
+    def _cut_ranking_slice(
+        self, video: dict, seg_id: str, url: str, start: float, end: float
+    ) -> Path | None:
+        """
+        Download the ranking Short in full (cached), then cut the requested
+        segment with ffmpeg.  All 5 clips from the same Short re-use the single
+        cached source file — one network round-trip instead of five.
+        """
+        # Derive a stable ID for the source Short (strip the _<start> suffix)
+        rv_id     = self._sanitize_id(
+            video.get("_ranking_vid_id") or video["id"].rsplit("_", 1)[0]
+        )
+        src_id    = f"{rv_id}_src"
+        src_path  = self._find_existing(src_id)
+
+        if not src_path:
+            logger.info(f"Downloading source Short {rv_id} for slice cache …")
+            out_tpl  = str(self.out_dir / f"{src_id}.%(ext)s")
+            opts     = self._build_ydl_opts("youtube", out_tpl)
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    if info is None:
+                        logger.warning(f"yt-dlp returned no info for {url}")
+                        return None
+            except yt_dlp.utils.DownloadError as e:
+                logger.warning(f"Source download failed for {url}: {e}")
+                return None
+            except Exception as e:
+                logger.error(f"Unexpected error downloading source {url}: {e}")
+                return None
+            src_path = self._find_existing(src_id)
+            if not src_path:
+                logger.warning(f"Source download completed but file not found: {src_id}")
+                return None
+            src_dur = self._probe_duration(src_path)
+            logger.info(f"  ✓ Source {src_path.name} cached ({src_dur:.1f}s, {_fmt_size(src_path)})")
+
+        # Cut the segment with ffmpeg stream-copy (fast, no re-encode)
+        seg_path = self.out_dir / f"{seg_id}.mp4"
+        duration = end - start
+        logger.info(f"  Cutting {seg_id} [{start:.1f}s – {end:.1f}s] …")
+        try:
+            subprocess.run(
+                ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                 "-ss", f"{start:.3f}", "-t", f"{duration:.3f}",
+                 "-i", str(src_path),
+                 "-c", "copy", str(seg_path)],
+                check=True, capture_output=True, timeout=60,
+            )
+        except subprocess.CalledProcessError as e:
+            logger.warning(f"ffmpeg cut failed for {seg_id}: {e.stderr.decode()[:200]}")
+            seg_path.unlink(missing_ok=True)
+            return None
+        except Exception as e:
+            logger.warning(f"ffmpeg cut error for {seg_id}: {e}")
+            seg_path.unlink(missing_ok=True)
+            return None
+
+        if not seg_path.exists() or seg_path.stat().st_size < 1000:
+            logger.warning(f"Cut produced empty file for {seg_id}")
+            seg_path.unlink(missing_ok=True)
+            return None
+
+        actual_dur = self._probe_duration(seg_path)
+        if actual_dur and actual_dur < MIN_DURATION:
+            logger.warning(f"Cut too short ({actual_dur:.1f}s), skipping {seg_id}")
+            seg_path.unlink(missing_ok=True)
+            return None
+
+        logger.info(
+            f"  ✓ {seg_path.name}  [{start:.1f}s–{end:.1f}s]  "
+            f"actual={actual_dur:.1f}s  ({_fmt_size(seg_path)})"
+        )
+        return seg_path
+
+    def _download_range_ytdlp(
+        self, video: dict, vid_id: str, url: str, platform: str,
+        start: float, end: float,
+    ) -> Path | None:
+        """Fall-back: use yt-dlp download_ranges for non-ranking clips."""
         out_template = str(self.out_dir / f"{vid_id}.%(ext)s")
         opts = self._build_ydl_opts(platform, out_template)
-        # Download only the specified time range
         opts["download_ranges"] = yt_dlp.utils.download_range_func(
             chapters=None,
             ranges=[(start, end)],
         )
         opts["force_keyframes_at_cuts"] = True
 
-        logger.info(
-            f"Downloading segment {vid_id} [{start:.1f}s – {end:.1f}s] …"
-        )
+        logger.info(f"Downloading segment {vid_id} [{start:.1f}s – {end:.1f}s] …")
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=True)
@@ -199,8 +288,6 @@ class Downloader:
 
             downloaded = self._find_existing(vid_id)
             if downloaded:
-                # Check segment duration — yt-dlp can produce near-zero clips
-                # for keyframe-aligned ranges that don't contain any frames.
                 seg_dur = self._probe_duration(downloaded)
                 if seg_dur and seg_dur < MIN_DURATION:
                     logger.warning(
@@ -209,16 +296,17 @@ class Downloader:
                     self._cleanup(vid_id)
                     return None
                 h = _probe_height(downloaded)
-                # Skip height filter for ranking slices — they come from
-                # proven 200K+ view Shorts, quality is always acceptable.
                 if h and h < MIN_CLIP_HEIGHT and platform != "ranking_slice":
                     logger.warning(
                         f"Segment too low-res ({h}p < {MIN_CLIP_HEIGHT}p), skipping {vid_id}"
                     )
                     self._cleanup(vid_id)
                     return None
-                logger.info(f"  ✓ {downloaded.name} ({_fmt_size(downloaded)})"
-                            + (f"  [{h}p]" if h else ""))
+                logger.info(
+                    f"  ✓ {downloaded.name}  [{start:.1f}s–{end:.1f}s]  "
+                    f"actual={seg_dur:.1f}s  ({_fmt_size(downloaded)})"
+                    + (f"  [{h}p]" if h else "")
+                )
                 return downloaded
             logger.warning(f"Segment download completed but file not found for {vid_id}")
             return None
