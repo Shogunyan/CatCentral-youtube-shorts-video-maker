@@ -29,6 +29,7 @@ import subprocess
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import quote_plus
 
 import yt_dlp
 
@@ -874,9 +875,18 @@ class VideoScraper:
         for q in queries:
             if len(found) >= RANKING_ANALYSE_LIMIT * 3:
                 break
-            logger.info(f"  Searching ranking sources: '{q[:55]}'")
+            logger.info(f"  Searching ranking sources (Shorts only): '{q[:55]}'")
             try:
-                entries = self._ydl_extract_flat(f"ytsearch20:{q}", playlist_end=20)
+                # sp=EgIYAQ%3D%3D is YouTube's built-in "Short" filter —
+                # only returns videos from the /shorts/ page, never regular uploads.
+                shorts_url = (
+                    "https://www.youtube.com/results"
+                    f"?search_query={quote_plus(q)}&sp=EgIYAQ%3D%3D"
+                )
+                entries = self._ydl_extract_flat(shorts_url, playlist_end=20)
+                if not entries:
+                    # Fallback: plain search (will still be filtered by duration + portrait)
+                    entries = self._ydl_extract_flat(f"ytsearch20:{q}", playlist_end=20)
             except Exception as ex:
                 logger.debug(f"Ranking search failed '{q}': {ex}")
                 continue
@@ -950,13 +960,22 @@ class VideoScraper:
         rv_duration = info.get("duration") or 0
         clips: list[dict] = []
 
-        # Safety gate: if the video is a long compilation (not a Short), each
-        # "rank segment" would itself be a mini-compilation showing multiple clips.
-        # Skip it so we only clone true ranking Shorts (≤65 s).
+        # Hard gate: only clone actual YouTube Shorts.
+        # Shorts are always ≤60 s AND portrait (9:16). Regular compilation
+        # uploads are landscape (16:9) and/or longer than 60 s. Cloning them
+        # produces a video where each rank slot shows multiple clips, not one.
         if rv_duration > 65:
             logger.info(
-                f"    Skipping: {rv_duration:.0f}s video is not a Short "
-                f"(>65 s) — each segment would contain multiple clips"
+                f"    Skipping {rv['id']}: {rv_duration:.0f}s — longer than 65s, not a Short"
+            )
+            return []
+
+        vw = info.get("width") or 0
+        vh = info.get("height") or 0
+        if vw and vh and vw >= vh:
+            logger.info(
+                f"    Skipping {rv['id']}: {vw}×{vh} landscape — "
+                "regular upload, not a Short"
             )
             return []
 
