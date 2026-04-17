@@ -936,13 +936,14 @@ def _render_with_remotion(
                     on_progress(f"Clip {i + 1} empty after processing: {dest.name}")
                 return None
 
-            # Use Gemini-detected clip duration exactly so output timing mirrors
-            # the source video. Cap at 59 s to stay within Shorts limits.
+            # Cap each clip so the total video stays within the 58s Shorts limit.
+            # e.g. 5 clips → max 11.6s each; 3 clips → max 19.3s each.
+            max_clip_frames = (58 * fps) // max(n, 1)
             actual_dur = _probe_duration(dest)
             if actual_dur and actual_dur > 0:
-                dur_frames = min(int(round(actual_dur * fps)), 59 * fps)
+                dur_frames = min(int(round(actual_dur * fps)), max_clip_frames)
             else:
-                dur_frames = clip_dur_frames
+                dur_frames = min(clip_dur_frames, max_clip_frames)
             total_frames_actual += dur_frames
 
             clip_rank = n - i   # rank 1 = best (last shown), rank n = first shown

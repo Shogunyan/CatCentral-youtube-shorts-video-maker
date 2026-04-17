@@ -949,13 +949,14 @@ class VideoScraper:
         rv_duration = info.get("duration") or 0
         clips: list[dict] = []
 
-        # Duration gate: skip long-form compilation videos (>65 s).
-        # Shorts are ≤60 s; anything longer has ranked sections that are
-        # themselves mini-compilations, producing multiple clips per rank slot.
+        # Duration gate: only clone actual Shorts (≤65 s).
+        # If duration is unknown (0) we can't verify — skip rather than risk
+        # cloning a long compilation where each rank shows multiple clips.
+        if not rv_duration:
+            logger.info(f"    Skipping {rv['id']}: duration unknown — can't verify Short")
+            return []
         if rv_duration > 65:
-            logger.info(
-                f"    Skipping {rv['id']}: {rv_duration:.0f}s > 65s — not a Short"
-            )
+            logger.info(f"    Skipping {rv['id']}: {rv_duration:.0f}s > 65s — not a Short")
             return []
 
         # ── Route A: Gemini Vision → direct time-range slices ────────────────
