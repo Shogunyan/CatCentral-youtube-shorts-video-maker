@@ -137,8 +137,9 @@ class Downloader:
                     )
                     self._cleanup(vid_id)
                     return None
-                # Trim long clips to the peak action moment before returning
-                self._trim_to_action(downloaded)
+                # Never trim the full ranking Short — we need every second of it.
+                if platform != "full_ranking_short":
+                    self._trim_to_action(downloaded)
                 logger.info(f"  ✓ {downloaded.name} ({_fmt_size(downloaded)})"
                             + (f"  [{h}p]" if h else ""))
                 return downloaded
@@ -554,7 +555,7 @@ class Downloader:
             ],
         }
 
-        if platform == "youtube":
+        if platform in ("youtube", "full_ranking_short"):
             # Prefer vertical / square formats for Shorts; fall back to best
             base["format"] = (
                 "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]"

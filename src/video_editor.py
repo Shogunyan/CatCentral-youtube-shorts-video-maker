@@ -1135,8 +1135,10 @@ def create_ranking_video(
 
 def _blur_text_regions(src: Path, dst: Path) -> None:
     """
-    Scale to 1080×1920 and blur the original creator's text regions
-    (title bar at top, corner watermarks) so our overlay can replace them.
+    Scale to 1080×1920 and blur the original creator's text regions:
+      • Top 150px  — title bar / channel name header
+      • Bottom 160px — username, music info, like/comment buttons
+    Audio is stream-copied (no re-encode).
     """
     _ffmpeg(
         "-i", str(src),
@@ -1145,18 +1147,94 @@ def _blur_text_regions(src: Path, dst: Path) -> None:
             "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
             "crop=1080:1920[scaled];"
             "[scaled]split=3[v1][v2][v3];"
-            # Blur top title bar (~130px)
-            "[v2]crop=1080:130:0:0,boxblur=30:5[btop];"
-            # Blur bottom-right corner watermark area
-            "[v3]crop=360:130:720:1790,boxblur=30:5[bbr];"
+            # Blur top 150px (title bar)
+            "[v2]crop=1080:150:0:0,boxblur=25:5[btop];"
+            # Blur bottom 160px (username, music, buttons)
+            "[v3]crop=1080:160:0:1760,boxblur=25:5[bbot];"
             "[v1][btop]overlay=0:0[o1];"
-            "[o1][bbr]overlay=720:1790"
+            "[o1][bbot]overlay=0:1760"
         ),
         "-map", "0:a?",
         "-c:v", VIDEO_CODEC, "-crf", "18", "-preset", "fast",
-        "-c:a", AUDIO_CODEC, "-b:a", AUDIO_BITRATE,
+        "-c:a", "copy",
         str(dst),
     )
+
+
+def _add_branding(
+    input_path: Path,
+    output_path: Path,
+    title: str,
+    watermark_text: str,
+) -> Path:
+    """
+    Single ffmpeg pass that adds:
+      • Our title text centred in the top blurred bar
+      • Moving @CatCentral watermark in corners
+      • Like & Subscribe popup badge (t=3..6)
+    """
+    wm    = _escape_drawtext(watermark_text)
+    ttl   = _escape_drawtext(_clean_title(title))
+    pad   = 55
+
+    # Moving watermark — cycles through 4 corner positions every 12 s
+    x_expr = (
+        f"if(eq(mod(floor(t/12),4),0),{pad},"
+        f"if(eq(mod(floor(t/12),4),1),w-tw-{pad},"
+        f"if(eq(mod(floor(t/12),4),2),{pad},"
+        f"w-tw-{pad})))"
+    )
+    y_expr = (
+        f"if(eq(mod(floor(t/12),4),0),{pad+20},"
+        f"if(eq(mod(floor(t/12),4),1),{pad+20},"
+        f"if(eq(mod(floor(t/12),4),2),h-th-{pad},"
+        f"h-th-{pad})))"
+    )
+
+    title_filter = (
+        f"drawtext=text='{ttl}'{_FONT_B}"
+        ":fontsize=38:fontcolor=white"
+        ":borderw=3:bordercolor=black@0.8"
+        ":x=(w-tw)/2:y=55"
+    )
+    wm_filter = (
+        f"drawtext=text='{wm}'{_FONT_P}"
+        ":fontsize=34:fontcolor=white@0.75"
+        ":borderw=2:bordercolor=black@0.6"
+        f":x='{x_expr}':y='{y_expr}'"
+    )
+    # L&S popup — centred, y=1710 = 1920-210
+    popup_box = (
+        "drawbox=x=280:y=1710:w=520:h=88"
+        ":color=#EE1111@0.88:t=fill"
+        ":enable='between(t,3,6)'"
+    )
+    popup_text = (
+        f"drawtext=text='LIKE \\& SUBSCRIBE'{_FONT_B}"
+        ":fontsize=40:fontcolor=white"
+        ":borderw=3:bordercolor=black@0.8"
+        ":x=(w-tw)/2:y=1728"
+        ":enable='between(t,3,6)'"
+    )
+    popup_hint = (
+        f"drawtext=text='for more cat videos'{_FONT_P}"
+        ":fontsize=24:fontcolor=white@0.8"
+        ":borderw=2:bordercolor=black@0.6"
+        ":x=(w-tw)/2:y=1768"
+        ":enable='between(t,3,6)'"
+    )
+
+    vf = f"{title_filter},{wm_filter},{popup_box},{popup_text},{popup_hint}"
+
+    _ffmpeg(
+        "-i", str(input_path),
+        "-vf", vf,
+        "-c:v", VIDEO_CODEC, "-crf", VIDEO_CRF, "-preset", "fast",
+        "-c:a", "copy",
+        "-movflags", "+faststart",
+        str(output_path),
+    )
+    return output_path
 
 
 def create_full_short_ranking_video(
@@ -1169,30 +1247,28 @@ def create_full_short_ranking_video(
 ) -> None:
     """
     Build a branded ranking Short:
-      1. Blur original creator's text regions (title bar + watermarks)
-      2. Add CatCentral watermark via ffmpeg drawtext
-    No Gemini segmentation required — the original Short is kept intact.
+      1. Scale to 1080×1920, blur top + bottom text bars
+      2. Overlay our title at top, moving watermark, L&S popup
+    No Gemini segmentation — the original Short is kept intact.
     """
     watermark_text = getattr(config, "watermark_text", "@CatCentral")
 
-    # Step 1: blur original text regions
     if on_progress:
         on_progress("Blurring original text overlays…")
     blurred = source_path.with_name(f"_blurred_{source_path.stem}.mp4")
     _blur_text_regions(source_path, blurred)
 
-    # Step 2: add watermark
     if on_progress:
-        on_progress("Adding CatCentral watermark…")
+        on_progress("Adding CatCentral title and watermark…")
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    result = _add_watermark(blurred, output_path, watermark_text)
+    result = _add_branding(blurred, output_path, title, watermark_text)
     blurred.unlink(missing_ok=True)
 
     if on_progress:
         on_progress("Done — video ready.")
 
     if not result or not result.exists():
-        raise RuntimeError("Watermark step failed for full-short mode")
+        raise RuntimeError("Branding step failed for full-short mode")
 
 
 def _render_full_short_with_remotion(

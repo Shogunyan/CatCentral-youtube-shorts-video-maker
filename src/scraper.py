@@ -286,17 +286,14 @@ _RANKING_REJECT = {
     "people", "human", "man ", "woman ", "kid ", "baby ",
     "parking", "ticket", "story", "comedy", "standup",
     "stand up", "comedian", "podcast", "interview",
-    # Obvious long-form / music channels (never Shorts)
+    # Obvious long-form / music (never Shorts)
     "compilation", "collection", "kiffness",
     "hour", "hours", "playlist",
-    # TV shows / media channels
-    "nickelodeon", "disney", "netflix", "hulu", "amazon",
-    "sam & cat", "sam&cat", "sitcom", "episode", "episodes",
-    "season", "series", "show", "channel", "network",
+    # Specific TV shows / streaming brands
+    "nickelodeon", "netflix", "hulu",
+    "sam & cat", "sam&cat", "sitcom",
+    "episode", "episodes", "season",
 }
-
-# "cat" or "cats" must appear in the title for it to be a cat ranking video.
-_CAT_WORDS = {"cat", "cats", "kitten", "kittens", "kitty", "kitties"}
 
 
 def _is_ranking_video(title: str) -> bool:
@@ -304,7 +301,7 @@ def _is_ranking_video(title: str) -> bool:
     if not title:
         return False
     t = title.lower()
-    # Must mention cats
+    # Must mention cats (uses the full _CAT_WORDS set defined above)
     if not any(w in t for w in _CAT_WORDS):
         return False
     # Must be a ranking/countdown format
@@ -1154,24 +1151,29 @@ class VideoScraper:
             logger.warning("Could not find any cat ranking videos — returning empty")
             return []
 
-        # ── Pick the first valid Short (≤90s, available) ─────────────────────
+        # ── Pick the first valid, unused Short (≤90s, available) ────────────────
         for rv in ranking_vids[:RANKING_ANALYSE_LIMIT]:
+            rv_id = rv["id"]
+            # Skip Shorts we've already used (reset after 14 days by reset_expired_clips)
+            if self._use_count(rv_id) > 0:
+                logger.info(f"  Skipping {rv_id}: already used recently")
+                continue
             logger.info(f"Checking: '{rv['title'][:60]}' ({rv['view_count']:,} views)")
             info = self._ydl_get_info(rv["url"])
             if not info:
-                logger.info(f"  Skipping {rv['id']}: unavailable or rate-limited")
+                logger.info(f"  Skipping {rv_id}: unavailable or rate-limited")
                 continue
             rv_duration = info.get("duration") or 0
             if not rv_duration or rv_duration > 90:
-                logger.info(f"  Skipping {rv['id']}: {rv_duration:.0f}s — not a Short")
+                logger.info(f"  Skipping {rv_id}: {rv_duration:.0f}s — not a Short")
                 continue
             rv_views = info.get("view_count") or rv["view_count"]
             if rv_views and rv_views < 1_000:
-                logger.info(f"  Skipping {rv['id']}: {rv_views} views — too low")
+                logger.info(f"  Skipping {rv_id}: {rv_views} views — too low")
                 continue
             logger.info(f"  ✓ Using '{rv['title'][:55]}' ({rv_views:,} views, {rv_duration:.0f}s)")
             return [{
-                "id":             rv["id"],
+                "id":             rv_id,
                 "url":            rv["url"],
                 "platform":       "full_ranking_short",
                 "title":          rv["title"],
@@ -1180,5 +1182,5 @@ class VideoScraper:
                 "_rank_segments": [],
             }]
 
-        logger.warning("No valid cat ranking Short found — pipeline will abort.")
+        logger.warning("No valid unused cat ranking Short found — pipeline will abort.")
         return []
