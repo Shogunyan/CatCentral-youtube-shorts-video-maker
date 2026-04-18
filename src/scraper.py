@@ -416,7 +416,7 @@ class VideoScraper:
                 logger.info(f"  Skipping {rv_id}: {rv_duration:.0f}s — not a Short")
                 continue
             rv_views = info.get("view_count") or rv["view_count"]
-            if rv_views and rv_views < 1_000:
+            if not rv_views or rv_views < 1_000:
                 logger.info(f"  Skipping {rv_id}: {rv_views} views — too low")
                 continue
             logger.info(f"  ✓ Using '{rv['title'][:55]}' ({rv_views:,} views, {rv_duration:.0f}s)")
