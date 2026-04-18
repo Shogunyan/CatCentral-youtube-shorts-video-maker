@@ -342,7 +342,8 @@ class VideoScraper:
                 break
             logger.info(f"  Searching ranking sources: '{q[:55]}'")
             try:
-                entries = self._ydl_extract_flat(f"ytsearch30:{q}", playlist_end=30)
+                # Append #shorts so YouTube's search algorithm returns Shorts preferentially
+                entries = self._ydl_extract_flat(f"ytsearch30:{q} #shorts", playlist_end=30)
             except Exception as ex:
                 logger.debug(f"Ranking search failed '{q}': {ex}")
                 continue
@@ -352,6 +353,12 @@ class VideoScraper:
                 vid_id = e.get("id", "")
                 if not vid_id or vid_id in seen:
                     continue
+
+                # Skip if yt-dlp explicitly identified this as a regular (non-Short) video
+                entry_url = e.get("url") or e.get("webpage_url") or ""
+                if entry_url and "/watch" in entry_url and "/shorts/" not in entry_url:
+                    continue
+
                 title = e.get("title", "")
                 if not _is_cat_video(title) or not _is_english(title):
                     continue
@@ -361,12 +368,13 @@ class VideoScraper:
                 if views and views < min_views:
                     continue
                 flat_dur = e.get("duration") or 0
-                if flat_dur and flat_dur > 300:
+                if flat_dur and flat_dur > 180:
                     continue
                 seen.add(vid_id)
                 found.append({
                     "id":         vid_id,
-                    "url":        f"https://www.youtube.com/watch?v={vid_id}",
+                    # Use /shorts/ URL — yt-dlp and YouTube treat this as a Shorts request
+                    "url":        f"https://www.youtube.com/shorts/{vid_id}",
                     "title":      title,
                     "view_count": views,
                 })
