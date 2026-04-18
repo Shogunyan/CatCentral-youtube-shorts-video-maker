@@ -103,8 +103,25 @@ def _probe_duration(path: Path) -> float:
 
 # ── Full-short mode functions ─────────────────────────────────────────────────
 
+def _gemini_with_retry(fn, retries: int = 4, base_delay: float = 5.0):
+    """Call fn(), retrying up to `retries` times on 429 rate-limit errors."""
+    import time as _time
+    for attempt in range(retries + 1):
+        try:
+            return fn()
+        except Exception as e:
+            msg = str(e).lower()
+            is_rate_limit = "429" in msg or "resource_exhausted" in msg or "quota" in msg
+            if is_rate_limit and attempt < retries:
+                wait = base_delay * (2 ** attempt)
+                logger.info(f"  Gemini rate-limited — retrying in {wait:.0f}s (attempt {attempt+1}/{retries})")
+                _time.sleep(wait)
+            else:
+                raise
+
+
 def _gemini_generate_ve(api_key: str, model: str, parts: list) -> str:
-    """Thin Gemini wrapper (local to video_editor — avoids cross-module import)."""
+    """Thin Gemini wrapper with retry on rate-limit errors."""
     try:
         from google import genai
         from google.genai import types
@@ -117,11 +134,15 @@ def _gemini_generate_ve(api_key: str, model: str, parts: list) -> str:
                 built.append(types.Part.from_bytes(data=p["data"], mime_type=p.get("mime_type", "image/jpeg")))
             else:
                 built.append(p)
-        return client.models.generate_content(model=model, contents=built).text
+        return _gemini_with_retry(
+            lambda: client.models.generate_content(model=model, contents=built).text
+        )
     except ImportError:
         import google.generativeai as genai  # type: ignore[no-redef]
         genai.configure(api_key=api_key)
-        return genai.GenerativeModel(model).generate_content(parts).text
+        return _gemini_with_retry(
+            lambda: genai.GenerativeModel(model).generate_content(parts).text
+        )
 
 
 def _extract_frame_ve(path: Path, timestamp: float) -> bytes | None:
@@ -212,9 +233,11 @@ def _gemini_detect_overlays(path: Path, api_key: str) -> list[tuple[int, int, in
         if video_file.state.name == "FAILED":
             raise RuntimeError("Gemini file processing failed")
 
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=[video_file, _OVERLAY_PROMPT],
+        response = _gemini_with_retry(
+            lambda: client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=[video_file, _OVERLAY_PROMPT],
+            )
         )
         try:
             client.files.delete(name=video_file.name)
