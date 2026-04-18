@@ -87,3 +87,7 @@ def setup_logging(config: Config):
             logging.StreamHandler(),
         ],
     )
+    # Silence noisy third-party loggers
+    for noisy in ("httpx", "httpcore", "google_genai", "google.generativeai",
+                  "googleapiclient", "urllib3", "asyncio"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
