@@ -1133,11 +1133,24 @@ def create_ranking_video(
 
 # ── Full-short mode functions ─────────────────────────────────────────────────
 
+def _strip_emoji(text: str) -> str:
+    """Remove emoji that ffmpeg drawtext can't render (shows as empty boxes)."""
+    return re.sub(
+        r"[\U0001F300-\U0001FAFF"   # symbols, pictographs, transport, flags
+        r"\U00002600-\U000027BF"    # misc symbols & dingbats
+        r"\U0000FE00-\U0000FE0F"    # variation selectors
+        r"\U0001F900-\U0001F9FF"    # supplemental symbols
+        r"\u200d\uFE0F]+",          # ZWJ and variation selector-16
+        "", text,
+    ).strip()
+
+
 def _blur_text_regions(src: Path, dst: Path) -> None:
     """
     Scale to 1080×1920 and blur the original creator's text regions:
-      • Top 150px  — title bar / channel name header
-      • Bottom 160px — username, music info, like/comment buttons
+      • Top 160px        — title bar / channel name header
+      • Bottom 220px     — username, music info, like/comment/share buttons
+      • Left 70px strip  — side rank panels (common in ranking Shorts)
     Audio is stream-copied (no re-encode).
     """
     _ffmpeg(
@@ -1146,13 +1159,16 @@ def _blur_text_regions(src: Path, dst: Path) -> None:
         (
             "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
             "crop=1080:1920[scaled];"
-            "[scaled]split=3[v1][v2][v3];"
-            # Blur top 150px (title bar)
-            "[v2]crop=1080:150:0:0,boxblur=25:5[btop];"
-            # Blur bottom 160px (username, music, buttons)
-            "[v3]crop=1080:160:0:1760,boxblur=25:5[bbot];"
+            "[scaled]split=4[v1][v2][v3][v4];"
+            # Top 160px — header/title bar
+            "[v2]crop=1080:160:0:0,boxblur=30:6[btop];"
+            # Bottom 220px — username, music, action buttons
+            "[v3]crop=1080:220:0:1700,boxblur=30:6[bbot];"
+            # Left 70px strip — side rank number panels
+            "[v4]crop=70:1920:0:0,boxblur=30:6[bleft];"
             "[v1][btop]overlay=0:0[o1];"
-            "[o1][bbot]overlay=0:1760"
+            "[o1][bbot]overlay=0:1700[o2];"
+            "[o2][bleft]overlay=0:0"
         ),
         "-map", "0:a?",
         "-c:v", VIDEO_CODEC, "-crf", "18", "-preset", "fast",
@@ -1173,9 +1189,13 @@ def _add_branding(
       • Moving @CatCentral watermark in corners
       • Like & Subscribe popup badge (t=3..6)
     """
-    wm    = _escape_drawtext(watermark_text)
-    ttl   = _escape_drawtext(_clean_title(title))
-    pad   = 55
+    wm  = _escape_drawtext(watermark_text)
+    # Strip emoji (ffmpeg drawtext renders them as empty boxes), then clean + escape
+    ttl = _escape_drawtext(_clean_title(_strip_emoji(title)))
+    # Hard-truncate so long titles don't overflow and shift off-screen
+    if len(ttl) > 42:
+        ttl = ttl[:40] + "..."
+    pad = 55
 
     # Moving watermark — cycles through 4 corner positions every 12 s
     x_expr = (
@@ -1191,11 +1211,12 @@ def _add_branding(
         f"h-th-{pad})))"
     )
 
+    # Title in top bar — max(10,...) prevents negative x when title is wide
     title_filter = (
         f"drawtext=text='{ttl}'{_FONT_B}"
         ":fontsize=38:fontcolor=white"
         ":borderw=3:bordercolor=black@0.8"
-        ":x=(w-tw)/2:y=55"
+        ":x=max(10\\,(w-tw)/2):y=58"
     )
     wm_filter = (
         f"drawtext=text='{wm}'{_FONT_P}"
