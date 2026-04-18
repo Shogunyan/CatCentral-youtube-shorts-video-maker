@@ -15,7 +15,7 @@ schedule>=1.2.1
 python-dotenv>=1.0.1
 colorama>=0.4.6
 
-# AI visual analysis — optional, activates frame-based source-clip detection
-# Set GEMINI_API_KEY in .env to enable (free at aistudio.google.com).
-# Works perfectly fine without it — just uses chapter/even slicing as fallback.
-google-genai>=1.0.0
+# Local OCR watermark detection — no API key, no rate limits
+easyocr>=1.7.0
+pillow>=10.0.0
+numpy>=1.24.0

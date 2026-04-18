@@ -103,48 +103,6 @@ def _probe_duration(path: Path) -> float:
 
 # ── Full-short mode functions ─────────────────────────────────────────────────
 
-def _gemini_with_retry(fn, retries: int = 4, base_delay: float = 5.0):
-    """Call fn(), retrying up to `retries` times on 429 rate-limit errors."""
-    import time as _time
-    for attempt in range(retries + 1):
-        try:
-            return fn()
-        except Exception as e:
-            msg = str(e).lower()
-            is_rate_limit = "429" in msg or "resource_exhausted" in msg or "quota" in msg
-            if is_rate_limit and attempt < retries:
-                wait = base_delay * (2 ** attempt)
-                logger.info(f"  Gemini rate-limited — retrying in {wait:.0f}s (attempt {attempt+1}/{retries})")
-                _time.sleep(wait)
-            else:
-                raise
-
-
-def _gemini_generate_ve(api_key: str, model: str, parts: list) -> str:
-    """Thin Gemini wrapper with retry on rate-limit errors."""
-    try:
-        from google import genai
-        from google.genai import types
-        client = genai.Client(api_key=api_key)
-        built = []
-        for p in parts:
-            if isinstance(p, str):
-                built.append(types.Part.from_text(text=p))
-            elif isinstance(p, dict) and "data" in p:
-                built.append(types.Part.from_bytes(data=p["data"], mime_type=p.get("mime_type", "image/jpeg")))
-            else:
-                built.append(p)
-        return _gemini_with_retry(
-            lambda: client.models.generate_content(model=model, contents=built).text
-        )
-    except ImportError:
-        import google.generativeai as genai  # type: ignore[no-redef]
-        genai.configure(api_key=api_key)
-        return _gemini_with_retry(
-            lambda: genai.GenerativeModel(model).generate_content(parts).text
-        )
-
-
 def _extract_frame_ve(path: Path, timestamp: float) -> bytes | None:
     """Extract a single JPEG frame from a local video file."""
     fd, tmp_str = tempfile.mkstemp(suffix=".jpg")
@@ -166,129 +124,102 @@ def _extract_frame_ve(path: Path, timestamp: float) -> bytes | None:
     return None
 
 
-_OVERLAY_PROMPT = (
-    "Watch this entire cat ranking YouTube Short.\n"
-    "Identify EVERY text overlay, watermark, channel handle/logo, rank number or label, "
-    "and any UI element burned in by the original creator — including elements that only "
-    "appear briefly or fade in/out during the video.\n"
-    "Do NOT include the actual cat footage or video background.\n\n"
-    "For each element give its bounding box as a percentage of frame size (0–100).\n"
-    "If an element moves or appears at multiple positions, return one box per position.\n"
-    "Be generous — make each box ~10% larger than the visible element to ensure full coverage.\n\n"
-    "Reply ONLY with valid JSON (no markdown):\n"
-    '{"regions": [{"x": <left%>, "y": <top%>, "w": <width%>, "h": <height%>, "label": "<what it is>"}]}'
-)
-
-
-def _parse_overlay_regions(raw: str) -> list[tuple[int, int, int, int]]:
-    """Parse Gemini's JSON response into pixel (x, y, w, h) tuples."""
-    raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.MULTILINE)
-    raw = re.sub(r"\s*```\s*$", "", raw, flags=re.MULTILINE)
-    brace = raw.find("{")
-    if brace == -1:
+def _merge_regions(
+    regions: list[tuple[int, int, int, int]],
+) -> list[tuple[int, int, int, int]]:
+    """Merge overlapping or within-20px-proximity bounding boxes."""
+    if not regions:
         return []
-    data = _json.loads(raw[brace:])
-    regions: list[tuple[int, int, int, int]] = []
-    pad = 12
-    for r in data.get("regions", []):
-        x = max(0,        int(r["x"] / 100 * 1080) - pad)
-        y = max(0,        int(r["y"] / 100 * 1920) - pad)
-        w = min(1080 - x, int(r["w"] / 100 * 1080) + pad * 2)
-        h = min(1920 - y, int(r["h"] / 100 * 1920) + pad * 2)
-        if w > 8 and h > 8:
-            label = r.get("label", "?")
-            logger.debug(f"    overlay: {label}  ({x},{y},{w},{h})")
-            regions.append((x, y, w, h))
-    return regions
+    boxes = [(x, y, x + w, y + h) for x, y, w, h in regions]
+    changed = True
+    while changed:
+        changed = False
+        merged: list[tuple[int, int, int, int]] = []
+        used = set()
+        for i, a in enumerate(boxes):
+            if i in used:
+                continue
+            x1, y1, x2, y2 = a
+            for j, b in enumerate(boxes):
+                if j <= i or j in used:
+                    continue
+                pad = 20
+                if a[0] - pad < b[2] and a[2] + pad > b[0] and \
+                   a[1] - pad < b[3] and a[3] + pad > b[1]:
+                    x1 = min(x1, b[0]); y1 = min(y1, b[1])
+                    x2 = max(x2, b[2]); y2 = max(y2, b[3])
+                    used.add(j)
+                    changed = True
+            used.add(i)
+            merged.append((x1, y1, x2, y2))
+        boxes = merged
+    return [(x1, y1, x2 - x1, y2 - y1) for x1, y1, x2, y2 in boxes]
 
 
-def _gemini_detect_overlays(path: Path, api_key: str) -> list[tuple[int, int, int, int]]:
+def _easyocr_detect_overlays(path: Path) -> list[tuple[int, int, int, int]]:
     """
-    Upload the full video to Gemini Files API so it can WATCH the entire Short
-    and identify every text overlay, watermark, and channel branding element —
-    including ones that only appear briefly or animate in/out.
-
-    Falls back to frame-sampling if the Files API upload fails, and to [] if
-    Gemini is unavailable entirely. Never raises — safe to call unconditionally.
+    Extract frames from the video, run EasyOCR to find all text regions,
+    and return pixel (x, y, w, h) bounding boxes for targeted blurring.
+    Completely local — no API calls, no rate limits.
     """
-    # ── Attempt 1: full-video upload via Files API ────────────────────────────
     try:
-        import time as _time
-        from google import genai
-        from google.genai import types
+        import easyocr
+        import numpy as np
+        from PIL import Image
+        import io as _io
+    except ImportError as e:
+        logger.warning(f"EasyOCR deps missing ({e}) — skipping watermark scan. Run: pip install easyocr pillow numpy")
+        return []
 
-        client = genai.Client(api_key=api_key)
-        logger.info("  Uploading Short to Gemini Files API for full-video analysis…")
-        video_file = client.files.upload(
-            path=str(path),
-            config=types.UploadFileConfig(mime_type="video/mp4"),
-        )
-        # Wait for processing (usually a few seconds for a Short)
-        for _ in range(30):
-            if video_file.state.name != "PROCESSING":
-                break
-            _time.sleep(1)
-            video_file = client.files.get(name=video_file.name)
-
-        if video_file.state.name == "FAILED":
-            raise RuntimeError("Gemini file processing failed")
-
-        response = _gemini_with_retry(
-            lambda: client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=[video_file, _OVERLAY_PROMPT],
-            )
-        )
-        try:
-            client.files.delete(name=video_file.name)
-        except Exception:
-            pass
-
-        regions = _parse_overlay_regions(response.text.strip())
-        logger.info(f"  Gemini (full video) detected {len(regions)} overlay region(s)")
-        return regions
-
-    except ImportError:
-        pass  # google-genai not available — fall through to frame sampling
-    except Exception as e:
-        logger.debug(f"Gemini Files API failed ({e}), falling back to frame sampling")
-
-    # ── Attempt 2: frame-sampling fallback (legacy SDK or Files API unavailable) ─
     try:
         duration = _probe_duration(path)
         if not duration or duration < 2:
             return []
 
-        n = min(8, max(3, int(duration / 4)))
-        margin = 0.5
-        timestamps = [margin + (duration - 2 * margin) * i / max(1, n - 1) for i in range(n)]
-
-        frame_data: list[tuple[float, bytes]] = []
-        for ts in timestamps:
-            fb = _extract_frame_ve(path, ts)
-            if fb:
-                frame_data.append((ts, fb))
-
-        if len(frame_data) < 2:
-            return []
-
-        parts: list = [
-            "You are analyzing frames from a cat ranking YouTube Short (1080×1920 px).\n"
-            + _OVERLAY_PROMPT
-            + f"\n\nVideo is {duration:.0f}s. Frames at: "
-            + ", ".join(f"{t:.1f}s" for t, _ in frame_data) + "\n",
+        # Sample frames spread across the video (skip first/last 1s)
+        n = min(8, max(3, int(duration / 8)))
+        margin = 1.0
+        timestamps = [
+            margin + (duration - 2 * margin) * i / max(1, n - 1)
+            for i in range(n)
         ]
-        for ts, fb in frame_data:
-            parts.append(f"\n[Frame at {ts:.1f}s]:")
-            parts.append({"mime_type": "image/jpeg", "data": fb})
 
-        raw = _gemini_generate_ve(api_key, "gemini-2.0-flash", parts).strip()
-        regions = _parse_overlay_regions(raw)
-        logger.info(f"  Gemini (frame sampling) detected {len(regions)} overlay region(s)")
-        return regions
+        logger.info(f"  EasyOCR: scanning {n} frames for watermarks…")
+        reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+
+        raw_regions: list[tuple[int, int, int, int]] = []
+        for ts in timestamps:
+            frame_bytes = _extract_frame_ve(path, ts)
+            if not frame_bytes:
+                continue
+            img = np.array(Image.open(_io.BytesIO(frame_bytes)).convert("RGB"))
+            for (bbox, text, conf) in reader.readtext(img):
+                if conf < 0.3 or not text.strip():
+                    continue
+                xs = [int(p[0]) for p in bbox]
+                ys = [int(p[1]) for p in bbox]
+                pad = 14
+                x = max(0,       min(xs) - pad)
+                y = max(0,       min(ys) - pad)
+                w = min(1080 - x, max(xs) - min(xs) + pad * 2)
+                h = min(1920 - y, max(ys) - min(ys) + pad * 2)
+                if w > 10 and h > 10:
+                    raw_regions.append((x, y, w, h))
+
+        merged = _merge_regions(raw_regions)
+
+        # Drop regions already fully covered by the baseline blur zones:
+        #   top 160px | bottom from y=1700 | left 70px
+        final = [
+            (x, y, w, h) for x, y, w, h in merged
+            if not (y + h <= 160 or y >= 1700 or x + w <= 70)
+        ]
+
+        logger.info(f"  EasyOCR detected {len(final)} mid-frame overlay region(s)")
+        return final
 
     except Exception as e:
-        logger.debug(f"Gemini frame-sampling fallback failed: {e}")
+        logger.warning(f"EasyOCR watermark scan failed: {e}")
         return []
 
 
@@ -467,7 +398,6 @@ def create_full_short_ranking_video(
     No Gemini segmentation — the original Short is kept intact.
     """
     watermark_text = getattr(config, "watermark_text", "@CatCentral")
-    api_key = os.getenv("GEMINI_API_KEY", "")
 
     # Step 1: fixed baseline blur (scale + top/bottom bars + left side strip)
     if on_progress:
@@ -475,18 +405,17 @@ def create_full_short_ranking_video(
     blurred = source_path.with_name(f"_blurred_{source_path.stem}.mp4")
     _blur_text_regions(source_path, blurred)
 
-    # Step 2: Gemini pinpoints any remaining mid-frame watermarks/overlays
-    if api_key:
+    # Step 2: EasyOCR pinpoints any remaining mid-frame watermarks/overlays
+    if on_progress:
+        on_progress("Scanning for mid-frame watermarks…")
+    ocr_regions = _easyocr_detect_overlays(source_path)
+    if ocr_regions:
         if on_progress:
-            on_progress("Gemini scanning for watermark positions…")
-        gemini_regions = _gemini_detect_overlays(source_path, api_key)
-        if gemini_regions:
-            if on_progress:
-                on_progress(f"Blurring {len(gemini_regions)} detected overlay(s)…")
-            targeted = source_path.with_name(f"_targeted_{source_path.stem}.mp4")
-            _blur_targeted_regions(blurred, targeted, gemini_regions)
-            blurred.unlink(missing_ok=True)
-            blurred = targeted
+            on_progress(f"Blurring {len(ocr_regions)} detected overlay(s)…")
+        targeted = source_path.with_name(f"_targeted_{source_path.stem}.mp4")
+        _blur_targeted_regions(blurred, targeted, ocr_regions)
+        blurred.unlink(missing_ok=True)
+        blurred = targeted
 
     # Step 3: add our title, watermark, and L&S popup
     if on_progress:
