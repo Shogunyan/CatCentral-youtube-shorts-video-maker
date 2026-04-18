@@ -336,13 +336,13 @@ class VideoScraper:
         seen: set[str] = set()
         found: list[dict] = []
 
-        queries = random.sample(RANKING_SOURCE_QUERIES, min(12, len(RANKING_SOURCE_QUERIES)))
+        queries = random.sample(RANKING_SOURCE_QUERIES, len(RANKING_SOURCE_QUERIES))
         for q in queries:
             if len(found) >= RANKING_ANALYSE_LIMIT * 3:
                 break
             logger.info(f"  Searching ranking sources: '{q[:55]}'")
             try:
-                entries = self._ydl_extract_flat(f"ytsearch20:{q}", playlist_end=20)
+                entries = self._ydl_extract_flat(f"ytsearch30:{q}", playlist_end=30)
             except Exception as ex:
                 logger.debug(f"Ranking search failed '{q}': {ex}")
                 continue
@@ -412,7 +412,7 @@ class VideoScraper:
                 logger.info(f"  Skipping {rv_id}: unavailable or rate-limited")
                 continue
             rv_duration = info.get("duration") or 0
-            if not rv_duration or rv_duration > 90:
+            if not rv_duration or rv_duration > 180:
                 logger.info(f"  Skipping {rv_id}: {rv_duration:.0f}s — not a Short")
                 continue
             rv_views = info.get("view_count") or rv["view_count"]
