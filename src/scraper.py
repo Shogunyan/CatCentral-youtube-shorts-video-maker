@@ -22,9 +22,9 @@ from .viral_db import ViralClipDB
 
 logger = logging.getLogger(__name__)
 
-MAX_CLIP_REUSE = 9999       # effectively unlimited — clips can always be re-used
+MAX_CLIP_REUSE = 3          # allow up to 3 uses before 14-day cooldown kicks in
 RANKING_MIN_VIEWS = 50_000  # 50K+ views required to be considered
-RANKING_ANALYSE_LIMIT = 15  # how many ranking vids to scan before giving up
+RANKING_ANALYSE_LIMIT = 50  # how many ranking vids to scan before giving up
 
 RANKING_SOURCE_QUERIES = [
     "funniest cats ranked shorts",
@@ -401,12 +401,12 @@ class VideoScraper:
             logger.warning("Could not find any cat ranking videos — returning empty")
             return []
 
-        # ── Pick the first valid, unused Short (≤90s, available) ────────────────
+        # ── Pick the first valid, unused Short (≤180s, available) ───────────────
         for rv in ranking_vids[:RANKING_ANALYSE_LIMIT]:
             rv_id = rv["id"]
-            # Skip Shorts we've already used (reset after 14 days by reset_expired_clips)
-            if self._use_count(rv_id) > 0:
-                logger.info(f"  Skipping {rv_id}: already used recently")
+            # Skip Shorts we've used MAX_CLIP_REUSE times (reset after 14 days)
+            if self._is_used(rv_id):
+                logger.info(f"  Skipping {rv_id}: used {self._use_count(rv_id)}x recently")
                 continue
             logger.info(f"Checking: '{rv['title'][:60]}' ({rv['view_count']:,} views)")
             info = self._ydl_get_info(rv["url"])
