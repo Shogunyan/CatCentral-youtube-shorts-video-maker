@@ -342,8 +342,7 @@ class VideoScraper:
                 break
             logger.info(f"  Searching ranking sources: '{q[:55]}'")
             try:
-                # Append #shorts so YouTube's search algorithm returns Shorts preferentially
-                entries = self._ydl_extract_flat(f"ytsearch30:{q} #shorts", playlist_end=30)
+                entries = self._ydl_extract_flat(f"ytsearch30:{q}", playlist_end=30)
             except Exception as ex:
                 logger.debug(f"Ranking search failed '{q}': {ex}")
                 continue
