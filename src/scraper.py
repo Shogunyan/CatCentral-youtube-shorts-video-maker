@@ -1024,10 +1024,12 @@ class VideoScraper:
                         "_view_estimate":     gc["view_count_estimate"],
                     })
 
+        target_n = getattr(self.config, 'clips_per_video', 5)
+
         # ── Route B: Chapter timestamp slicing ────────────────────────────────
         # Chapter markers tell us exactly where each clip starts/ends.
         # Slice the ranking video at those boundaries. No searching needed.
-        if not clips and chapters and rv_duration >= 10:
+        if len(clips) < target_n and chapters and rv_duration >= 10:
             logger.info(f"    Route B (chapter slicing): {len(chapters)} chapters")
             last_end: float = -999.0
             for ch in chapters:
@@ -1064,9 +1066,9 @@ class VideoScraper:
                 })
 
         # ── Route C: Even time slicing ────────────────────────────────────────
-        # Last resort when Gemini Vision fails and no chapters are available.
-        if not clips and rv_duration >= 15:
-            n = min(5, max(2, int(rv_duration / 15)))
+        # Fills remaining slots when Routes A/B found fewer clips than needed.
+        if len(clips) < target_n and rv_duration >= 15:
+            n = min(target_n, max(2, int(rv_duration / 10)))
             logger.info(f"    Route C (even slicing): {n} segments from {rv_duration:.0f}s")
             for i in range(n):
                 start   = max(3.0, rv_duration * i / n)
