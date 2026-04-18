@@ -289,7 +289,14 @@ _RANKING_REJECT = {
     # Obvious long-form / music channels (never Shorts)
     "compilation", "collection", "kiffness",
     "hour", "hours", "playlist",
+    # TV shows / media channels
+    "nickelodeon", "disney", "netflix", "hulu", "amazon",
+    "sam & cat", "sam&cat", "sitcom", "episode", "episodes",
+    "season", "series", "show", "channel", "network",
 }
+
+# "cat" or "cats" must appear in the title for it to be a cat ranking video.
+_CAT_WORDS = {"cat", "cats", "kitten", "kittens", "kitty", "kitties"}
 
 
 def _is_ranking_video(title: str) -> bool:
@@ -297,9 +304,13 @@ def _is_ranking_video(title: str) -> bool:
     if not title:
         return False
     t = title.lower()
+    # Must mention cats
+    if not any(w in t for w in _CAT_WORDS):
+        return False
+    # Must be a ranking/countdown format
     if not any(w in t for w in _RANKING_WORDS):
         return False
-    # Reject mixed-animal or non-cat ranking videos
+    # Reject TV shows, mixed-animal, or long-form content
     if any(w in t for w in _RANKING_REJECT):
         return False
     return True
