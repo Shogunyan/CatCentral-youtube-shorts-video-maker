@@ -27,6 +27,7 @@ import random
 import re
 import subprocess
 import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -285,10 +286,8 @@ _RANKING_REJECT = {
     "people", "human", "man ", "woman ", "kid ", "baby ",
     "parking", "ticket", "story", "comedy", "standup",
     "stand up", "comedian", "podcast", "interview",
-    # Long compilations and music channels (NOT Shorts)
-    "compilation", "collection", "episodes", "episode",
-    "songs", "song", "music", "kiffness",
-    "best of", "funny moments", "funny videos",
+    # Obvious long-form / music channels (never Shorts)
+    "compilation", "collection", "kiffness",
     "hour", "hours", "playlist",
 }
 
@@ -404,7 +403,11 @@ class VideoScraper:
         return []
 
     def _ydl_get_info(self, url: str) -> dict | None:
-        """Get full video metadata including chapters (no download)."""
+        """Get full video metadata including chapters (no download).
+
+        Retries once after a short pause — YouTube rate-limits rapid sequential
+        info requests made right after a search burst.
+        """
         opts = {
             "quiet": True,
             "no_warnings": True,
@@ -413,12 +416,17 @@ class VideoScraper:
             "skip_download": True,
             "socket_timeout": 20,
         }
-        try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                return ydl.extract_info(url, download=False)
-        except Exception as e:
-            logger.debug(f"Failed to get info for {url}: {e}")
-            return None
+        for attempt in range(2):
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                    if info:
+                        return info
+            except Exception as e:
+                logger.debug(f"Failed to get info for {url} (attempt {attempt+1}): {e}")
+            if attempt == 0:
+                time.sleep(1.5)   # brief pause before retry
+        return None
 
     def _get_comment_timestamps(self, url: str, duration: float) -> list[float]:
         """
@@ -911,7 +919,7 @@ class VideoScraper:
                 # (Flat-extract often returns 0/None so we can't rely on it fully —
                 # _analyze_ranking_video does the definitive gate.)
                 flat_dur = e.get("duration") or 0
-                if flat_dur and flat_dur > 180:
+                if flat_dur and flat_dur > 300:   # hard pre-filter: definitely not a Short
                     continue
                 seen.add(vid_id)
                 found.append({
@@ -966,8 +974,8 @@ class VideoScraper:
         if not rv_duration:
             logger.info(f"    Skipping {rv['id']}: duration unknown — can't verify Short")
             return []
-        if rv_duration > 65:
-            logger.info(f"    Skipping {rv['id']}: {rv_duration:.0f}s > 65s — not a Short")
+        if rv_duration > 90:
+            logger.info(f"    Skipping {rv['id']}: {rv_duration:.0f}s > 90s — not a Short")
             return []
         logger.info(f"    Source Short confirmed: {rv_duration:.0f}s — proceeding with analysis")
 
