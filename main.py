@@ -109,7 +109,24 @@ def cmd_schedule(config):
     scheduler.start()
 
 
+def _auto_update():
+    """Pull latest changes from the remote branch silently on every startup."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["git", "pull", "--ff-only", "origin", "claude/cat-video-ranking-system-bht7M"],
+            capture_output=True, text=True,
+            cwd=Path(__file__).parent,
+            timeout=15,
+        )
+        if result.returncode == 0 and "Already up to date" not in result.stdout:
+            print(green(f"  ✓ Updated: {result.stdout.strip()}"))
+    except Exception:
+        pass  # no internet / not a git repo — just continue
+
+
 def main():
+    _auto_update()
     args = sys.argv[1:]
 
     # No arguments → launch the TUI
