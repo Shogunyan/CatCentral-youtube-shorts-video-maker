@@ -90,13 +90,14 @@ class Downloader:
         If the dict contains start_time/end_time, only that segment is downloaded.
         Returns the local file path on success, None on failure.
         """
+        platform = video.get("platform", "unknown")
+        if platform == "full_ranking_short":
+            return self._download_full(video)
+
         start_time = video.get("start_time")
         end_time = video.get("end_time")
-
         if start_time is not None and end_time is not None:
-            return self._download_segment(
-                video, float(start_time), float(end_time)
-            )
+            return self._download_segment(video, float(start_time), float(end_time))
         return self._download_full(video)
 
     def _download_full(self, video: dict) -> Path | None:

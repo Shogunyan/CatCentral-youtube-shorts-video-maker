@@ -97,6 +97,74 @@ class Pipeline:
         self._report(15, "🔍  Scraping complete",
                      f"Found {len(candidates)} candidate videos")
 
+        # ── Full-short mode: download 1 source video, overlay our branding ────────
+        if candidates[0].get("_full_short"):
+            full_item = candidates[0]
+            rank_segments = full_item.get("_rank_segments", [])
+            if not rank_segments:
+                self._report(5, "❌  No rank segments", "Gemini found no segments in the ranking Short")
+                return False
+
+            slug = (full_item.get("title") or "ranking Short")[:55]
+            self._report(18, "⬇  Downloading ranking Short…", f"↓ [FULL_SHORT] {slug}")
+            source_path = self.downloader.download(full_item)
+            if not source_path:
+                self._report(18, "❌  Download failed", "Could not download ranking Short")
+                return False
+            kb = source_path.stat().st_size // 1024
+            self._report(44, "⬇  Downloaded", f"✓ Source Short downloaded ({kb} KB)")
+
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_path = self.config.processed_dir / f"ranking_{ts}_{run_id}.mp4"
+
+            total_video_steps = len(rank_segments) * 2 + 2
+            video_step = [0]
+
+            def on_video_step(step_msg: str) -> None:
+                video_step[0] += 1
+                pct = 52 + int(video_step[0] / total_video_steps * 36)
+                self._report(min(pct, 88), f"🎬  {step_msg}", step_msg)
+
+            self._report(52, "🎬  Building ranking video…", "Blurring original overlays + rendering CatCentral branding…")
+            try:
+                if not self.dry_run:
+                    from src.video_editor import create_full_short_ranking_video
+                    create_full_short_ranking_video(
+                        source_path=source_path,
+                        rank_segments=rank_segments,
+                        title=title,
+                        output_path=output_path,
+                        config=self.config,
+                        on_progress=on_video_step,
+                    )
+                else:
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    output_path.touch()
+            except Exception as e:
+                self._report(52, "❌  Video creation failed", str(e))
+                logger.error(f"Video creation failed: {e}", exc_info=True)
+                return False
+
+            # Upload + mark used (same as existing flow)
+            self._report(90, "📤  Uploading to YouTube…", "Starting upload…")
+            if self.dry_run:
+                video_id = "DRY_RUN"
+            else:
+                video_id = self.uploader.upload(
+                    video_path=output_path,
+                    title=caption["title"],
+                    description=caption["description"],
+                    tags=caption["tags"],
+                )
+                if not video_id:
+                    self._report(90, "❌  Upload failed", "YouTube upload returned no ID")
+                    return False
+
+            self.scraper.mark_used([full_item])
+            self._report(100, "✅  Done! Video is live.", f"https://www.youtube.com/shorts/{video_id}")
+            logger.info(f"Run {run_id} complete. video_id={video_id}")
+            return True
+
         # ── 2. Download — report per clip ─────────────────────────────────────
         self._report(18, f"⬇  Downloading clips (0/{n})…", "Starting downloads")
         downloaded: list[tuple[dict, Path]] = []

@@ -38,6 +38,8 @@ export interface ClipData {
   durationFrames: number;
   /** How many different 1M+ view ranking videos have featured this clip */
   viralScore?: number;
+  /** Frame offset into the source file to start playing from (full-short mode) */
+  startFrom?: number;
 }
 
 export interface CatRankingProps {
@@ -218,6 +220,7 @@ const ClipView: React.FC<{
       {/* ── Background video ─────────────────────────────────────────────── */}
       <OffthreadVideo
         src={staticFile(`clips/${clip.path}`)}
+        startFrom={clip.startFrom ?? 0}
         style={{width:'100%', height:'100%', objectFit:'cover', objectPosition:'center'}}
       />
 

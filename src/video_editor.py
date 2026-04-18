@@ -1131,6 +1131,185 @@ def create_ranking_video(
     )
 
 
+# ── Full-short mode functions ─────────────────────────────────────────────────
+
+def _blur_text_regions(src: Path, dst: Path) -> None:
+    """
+    Scale to 1080×1920 and blur the original creator's text regions
+    (title bar at top, corner watermarks) so our overlay can replace them.
+    """
+    _ffmpeg(
+        "-i", str(src),
+        "-filter_complex",
+        (
+            "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
+            "crop=1080:1920[scaled];"
+            "[scaled]split=3[v1][v2][v3];"
+            # Blur top title bar (~130px)
+            "[v2]crop=1080:130:0:0,boxblur=30:5[btop];"
+            # Blur bottom-right corner watermark area
+            "[v3]crop=360:130:720:1790,boxblur=30:5[bbr];"
+            "[v1][btop]overlay=0:0[o1];"
+            "[o1][bbr]overlay=720:1790"
+        ),
+        "-map", "0:a?",
+        "-c:v", VIDEO_CODEC, "-crf", "18", "-preset", "fast",
+        "-c:a", AUDIO_CODEC, "-b:a", AUDIO_BITRATE,
+        str(dst),
+    )
+
+
+def create_full_short_ranking_video(
+    source_path: Path,
+    rank_segments: list[dict],
+    title: str,
+    output_path: Path,
+    config,
+    on_progress=None,
+) -> None:
+    """
+    Build a ranking Short by:
+      1. Blurring original creator's text regions (title bar + watermarks)
+      2. Rendering CatCentral's rank UI + watermark via Remotion on top
+         using startFrom to show each segment of the continuous source video.
+    """
+    if not rank_segments:
+        raise RuntimeError("No rank segments provided")
+
+    # Step 1: blur original text regions
+    if on_progress:
+        on_progress("Blurring original text overlays…")
+    blurred = source_path.with_name(f"_blurred_{source_path.stem}.mp4")
+    _blur_text_regions(source_path, blurred)
+
+    # Step 2: probe actual duration
+    total_dur  = _probe_duration(blurred)
+    if not total_dur:
+        raise RuntimeError("Could not probe blurred source duration")
+
+    # Step 3: render via Remotion (reuse existing function with full-short params)
+    if on_progress:
+        on_progress(f"Rendering with Remotion ({total_dur:.0f}s video)…")
+
+    result = _render_full_short_with_remotion(
+        blurred_source=blurred,
+        rank_segments=rank_segments,
+        title=title,
+        output_path=output_path,
+        config=config,
+        on_progress=on_progress,
+    )
+
+    blurred.unlink(missing_ok=True)
+
+    if not result or not result.exists():
+        raise RuntimeError("Remotion render failed for full-short mode")
+
+
+def _render_full_short_with_remotion(
+    blurred_source: Path,
+    rank_segments: list[dict],
+    title: str,
+    output_path: Path,
+    config,
+    on_progress=None,
+) -> Path | None:
+    """Render the full-short ranking video with Remotion."""
+    if not _ensure_remotion(on_progress):
+        return None
+
+    fps        = FPS
+    session_id = uuid.uuid4().hex[:10]
+    clips_pub  = _REMOTION_DIR / "public" / "clips" / session_id
+    clips_pub.mkdir(parents=True, exist_ok=True)
+
+    # Copy blurred source into Remotion public/
+    dest = clips_pub / "source.mp4"
+    shutil.copy2(blurred_source, dest)
+
+    # Ding SFX
+    sfx_public = _REMOTION_DIR / "public" / "sfx"
+    sfx_public.mkdir(parents=True, exist_ok=True)
+    has_ding = False
+    ding_src = _get_ding()
+    if ding_src and ding_src.exists():
+        sfx_dest = sfx_public / "ding.mp3"
+        if not sfx_dest.exists():
+            shutil.copy2(ding_src, sfx_dest)
+        has_ding = sfx_dest.exists()
+
+    props_file = _REMOTION_DIR / f"_props_{session_id}.json"
+
+    try:
+        n   = len(rank_segments)
+
+        clip_refs = []
+        total_frames = 0
+        for i, seg in enumerate(rank_segments):
+            start_f  = int(round(seg.get("start_time", 0) * fps))
+            dur_f    = max(fps, int(round((seg.get("end_time", 0) - seg.get("start_time", 0)) * fps)))
+            raw_label = seg.get("screen_label") or seg.get("title") or ""
+            clip_rank = n - i
+            clip_refs.append({
+                "path":           f"{session_id}/source.mp4",
+                "rank":           clip_rank,
+                "label":          _make_short_label(raw_label, rank=clip_rank, n_clips=n),
+                "durationFrames": dur_f,
+                "startFrom":      start_f,
+                "viralScore":     seg.get("_viral_score", 0),
+            })
+            total_frames += dur_f
+
+        props = {
+            "clips":        clip_refs,
+            "title":        title,
+            "watermark":    getattr(config, "watermark_text", "@CatCentral"),
+            "totalFrames":  total_frames,
+            "hasDing":      has_ding,
+            "hasCountdown": n >= 5,
+        }
+        props_file.write_text(_json.dumps(props))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        total_secs = total_frames / fps
+        if on_progress:
+            on_progress(f"Rendering with Remotion ({total_secs:.0f}s video)…")
+
+        concurrency = min(4, multiprocessing.cpu_count())
+        remotion_bin = _REMOTION_DIR / "node_modules" / ".bin" / "remotion"
+        browser_exe = _find_headless_browser()
+        cmd = [
+            str(remotion_bin), "render",
+            "src/index.tsx",
+            "CatRanking",
+            str(output_path.resolve()),
+            f"--props={props_file.resolve()}",
+            "--codec=h264",
+            "--crf=18",
+            "--log=verbose",
+            "--overwrite",
+            f"--concurrency={concurrency}",
+            "--gl=swangle",
+            "--disable-compositor",
+        ]
+        if browser_exe:
+            cmd.append(f"--browser-executable={browser_exe}")
+
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            cwd=str(_REMOTION_DIR), timeout=1800,
+        )
+        if result.returncode != 0:
+            logger.error(f"Remotion render failed:\n{result.stderr[-2000:]}")
+            return None
+
+        return output_path if output_path.exists() else None
+
+    finally:
+        props_file.unlink(missing_ok=True)
+        shutil.rmtree(clips_pub, ignore_errors=True)
+
+
 # ── CLI helper ────────────────────────────────────────────────────────────────
 
 def check_ffmpeg():

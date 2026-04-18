@@ -1172,16 +1172,20 @@ class VideoScraper:
             )
             return []
 
-        # Preserve original video order: sort by start_time so clip sequence
-        # mirrors the source video (rank 5 first → rank 1 last).
         clips.sort(key=lambda c: c.get("start_time") or 0)
-
-        # Annotate with viral scores for the badge overlay
         for c in clips:
             c["_viral_score"] = self._viral_db.get_viral_score(c["id"])
 
-        result = clips[:want]
-        logger.info(
-            f"Returning {len(result)} clips in original video order"
-        )
-        return result
+        rv_id  = clips[0].get("_ranking_vid_id", "")
+        rv_url = clips[0].get("url", "")
+        rv_views = clips[0].get("view_count", 0)
+
+        logger.info(f"Returning full-short item: {len(clips)} rank segments from {rv_id}")
+        return [{
+            "id":             rv_id,
+            "url":            rv_url,
+            "platform":       "full_ranking_short",
+            "view_count":     rv_views,
+            "_full_short":    True,
+            "_rank_segments": clips,
+        }]
