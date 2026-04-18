@@ -1133,6 +1133,150 @@ def create_ranking_video(
 
 # ── Full-short mode functions ─────────────────────────────────────────────────
 
+def _gemini_generate_ve(api_key: str, model: str, parts: list) -> str:
+    """Thin Gemini wrapper (local to video_editor — avoids cross-module import)."""
+    try:
+        from google import genai
+        from google.genai import types
+        client = genai.Client(api_key=api_key)
+        built = []
+        for p in parts:
+            if isinstance(p, str):
+                built.append(types.Part.from_text(text=p))
+            elif isinstance(p, dict) and "data" in p:
+                built.append(types.Part.from_bytes(data=p["data"], mime_type=p.get("mime_type", "image/jpeg")))
+            else:
+                built.append(p)
+        return client.models.generate_content(model=model, contents=built).text
+    except ImportError:
+        import google.generativeai as genai  # type: ignore[no-redef]
+        genai.configure(api_key=api_key)
+        return genai.GenerativeModel(model).generate_content(parts).text
+
+
+def _extract_frame_ve(path: Path, timestamp: float) -> bytes | None:
+    """Extract a single JPEG frame from a local video file."""
+    fd, tmp_str = tempfile.mkstemp(suffix=".jpg")
+    tmp = Path(tmp_str)
+    try:
+        os.close(fd)
+        subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+             "-ss", f"{timestamp:.3f}", "-i", str(path),
+             "-vframes", "1", "-q:v", "3", str(tmp)],
+            check=True, capture_output=True, timeout=15,
+        )
+        if tmp.exists() and tmp.stat().st_size > 0:
+            return tmp.read_bytes()
+    except Exception:
+        pass
+    finally:
+        tmp.unlink(missing_ok=True)
+    return None
+
+
+def _gemini_detect_overlays(path: Path, api_key: str) -> list[tuple[int, int, int, int]]:
+    """
+    Sample frames from the source Short and ask Gemini Vision to pinpoint
+    every text overlay, watermark, rank number, and channel branding element.
+
+    Returns a list of (x, y, w, h) pixel coords in 1080×1920 space, padded
+    slightly so blurring fully covers each element. Falls back to [] on failure.
+    """
+    try:
+        duration = _probe_duration(path)
+        if not duration or duration < 2:
+            return []
+
+        # 6 frames spread through the video, avoiding first/last 0.5s
+        n = min(6, max(3, int(duration / 5)))
+        margin = 0.5
+        timestamps = [margin + (duration - 2 * margin) * i / max(1, n - 1) for i in range(n)]
+
+        frame_data: list[tuple[float, bytes]] = []
+        for ts in timestamps:
+            fb = _extract_frame_ve(path, ts)
+            if fb:
+                frame_data.append((ts, fb))
+
+        if len(frame_data) < 2:
+            return []
+
+        prompt: list = [
+            "You are analyzing frames from a cat ranking YouTube Short (1080×1920 px).\n"
+            "Identify EVERY text overlay, watermark, channel handle, rank number/label, "
+            "logo, or UI element that is burned into the video by the original creator.\n"
+            "Do NOT include the actual cat footage or video background.\n\n"
+            "For each element give its bounding box as a percentage of frame dimensions (0–100).\n"
+            "Be generous — if unsure of exact bounds, make the box 10–15% larger on each side.\n\n"
+            "Reply ONLY with valid JSON (no markdown fences):\n"
+            '{"regions": [{"x": <left%>, "y": <top%>, "w": <width%>, "h": <height%>}]}\n\n'
+            f"Video is {duration:.0f}s. Frames sampled at: "
+            f"{', '.join(f'{t:.1f}s' for t, _ in frame_data)}\n",
+        ]
+        for ts, fb in frame_data:
+            prompt.append(f"\n[Frame at {ts:.1f}s]:")
+            prompt.append({"mime_type": "image/jpeg", "data": fb})
+
+        raw = _gemini_generate_ve(api_key, "gemini-2.0-flash", prompt).strip()
+        raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.MULTILINE)
+        raw = re.sub(r"\s*```\s*$", "", raw, flags=re.MULTILINE)
+        brace = raw.find("{")
+        if brace == -1:
+            return []
+        data = _json.loads(raw[brace:])
+
+        regions: list[tuple[int, int, int, int]] = []
+        pad = 12  # extra pixels of padding around each detected element
+        for r in data.get("regions", []):
+            x = max(0,    int(r["x"] / 100 * 1080) - pad)
+            y = max(0,    int(r["y"] / 100 * 1920) - pad)
+            w = min(1080 - x, int(r["w"] / 100 * 1080) + pad * 2)
+            h = min(1920 - y, int(r["h"] / 100 * 1920) + pad * 2)
+            if w > 8 and h > 8:
+                regions.append((x, y, w, h))
+
+        logger.info(f"  Gemini detected {len(regions)} overlay region(s) to blur")
+        return regions
+
+    except Exception as e:
+        logger.debug(f"Gemini overlay detection failed: {e}")
+        return []
+
+
+def _blur_targeted_regions(
+    src: Path, dst: Path, regions: list[tuple[int, int, int, int]]
+) -> None:
+    """
+    Apply targeted boxblur to specific (x, y, w, h) pixel regions on a
+    1080×1920 video. Used on top of the fixed-bar baseline blur so that
+    any mid-frame watermarks Gemini detected are also removed.
+    """
+    if not regions:
+        shutil.copy2(src, dst)
+        return
+
+    n = len(regions)
+    split_labels = "".join(f"[c{i}]" for i in range(n))
+    fc = [f"[0:v]split={n + 1}[base]{split_labels}"]
+    for i, (x, y, w, h) in enumerate(regions):
+        fc.append(f"[c{i}]crop={w}:{h}:{x}:{y},boxblur=30:6[b{i}]")
+    prev = "base"
+    for i, (x, y, w, h) in enumerate(regions):
+        nxt = "out" if i == n - 1 else f"o{i}"
+        fc.append(f"[{prev}][b{i}]overlay={x}:{y}[{nxt}]")
+        prev = nxt
+
+    _ffmpeg(
+        "-i", str(src),
+        "-filter_complex", ";".join(fc),
+        "-map", "[out]", "-map", "0:a?",
+        "-c:v", VIDEO_CODEC, "-crf", "18", "-preset", "fast",
+        "-c:a", "copy",
+        str(dst),
+    )
+
+
 def _strip_emoji(text: str) -> str:
     """Remove emoji that ffmpeg drawtext can't render (shows as empty boxes)."""
     return re.sub(
@@ -1273,12 +1417,28 @@ def create_full_short_ranking_video(
     No Gemini segmentation — the original Short is kept intact.
     """
     watermark_text = getattr(config, "watermark_text", "@CatCentral")
+    api_key = os.getenv("GEMINI_API_KEY", "")
 
+    # Step 1: fixed baseline blur (scale + top/bottom bars + left side strip)
     if on_progress:
         on_progress("Blurring original text overlays…")
     blurred = source_path.with_name(f"_blurred_{source_path.stem}.mp4")
     _blur_text_regions(source_path, blurred)
 
+    # Step 2: Gemini pinpoints any remaining mid-frame watermarks/overlays
+    if api_key:
+        if on_progress:
+            on_progress("Gemini scanning for watermark positions…")
+        gemini_regions = _gemini_detect_overlays(source_path, api_key)
+        if gemini_regions:
+            if on_progress:
+                on_progress(f"Blurring {len(gemini_regions)} detected overlay(s)…")
+            targeted = source_path.with_name(f"_targeted_{source_path.stem}.mp4")
+            _blur_targeted_regions(blurred, targeted, gemini_regions)
+            blurred.unlink(missing_ok=True)
+            blurred = targeted
+
+    # Step 3: add our title, watermark, and L&S popup
     if on_progress:
         on_progress("Adding CatCentral title and watermark…")
     output_path.parent.mkdir(parents=True, exist_ok=True)
