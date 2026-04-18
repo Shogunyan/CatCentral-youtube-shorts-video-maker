@@ -130,9 +130,8 @@ class Downloader:
             downloaded = self._find_existing(vid_id)
             if downloaded:
                 h = _probe_height(downloaded)
-                # Only apply height filter to standalone clips — ranking slices
-                # come from proven 200K+ view Shorts and are always usable.
-                if h and h < MIN_CLIP_HEIGHT and platform != "ranking_slice":
+                # Skip height filter for ranking source videos — we take what we get.
+                if h and h < MIN_CLIP_HEIGHT and platform not in ("ranking_slice", "full_ranking_short"):
                     logger.warning(
                         f"Clip too low-res ({h}p < {MIN_CLIP_HEIGHT}p), skipping {vid_id}"
                     )

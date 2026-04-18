@@ -974,19 +974,22 @@ class VideoScraper:
             return []
 
         rv_id       = rv["id"]
-        rv_views    = rv["view_count"]
+        # Use real view count from full info fetch (flat-extract often returns 0)
+        rv_views    = info.get("view_count") or rv["view_count"]
         chapters    = info.get("chapters") or []
         rv_duration = info.get("duration") or 0
         clips: list[dict] = []
 
-        # Duration gate: only clone actual Shorts (≤65 s).
-        # If duration is unknown (0) we can't verify — skip rather than risk
-        # cloning a long compilation where each rank shows multiple clips.
+        # Duration gate: only clone actual Shorts (≤90 s).
         if not rv_duration:
             logger.info(f"    Skipping {rv['id']}: duration unknown — can't verify Short")
             return []
         if rv_duration > 90:
             logger.info(f"    Skipping {rv['id']}: {rv_duration:.0f}s > 90s — not a Short")
+            return []
+        # View gate: skip genuinely low-view videos (but allow 0 when info couldn't fetch it)
+        if rv_views and rv_views < 1_000:
+            logger.info(f"    Skipping {rv['id']}: {rv_views} views — too low")
             return []
         logger.info(f"    Source Short confirmed: {rv_duration:.0f}s — proceeding with analysis")
 
