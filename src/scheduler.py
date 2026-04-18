@@ -101,9 +101,6 @@ class Pipeline:
         if candidates[0].get("_full_short"):
             full_item = candidates[0]
             rank_segments = full_item.get("_rank_segments", [])
-            if not rank_segments:
-                self._report(5, "❌  No rank segments", "Gemini found no segments in the ranking Short")
-                return False
 
             slug = (full_item.get("title") or "ranking Short")[:55]
             self._report(18, "⬇  Downloading ranking Short…", f"↓ [FULL_SHORT] {slug}")
@@ -117,7 +114,7 @@ class Pipeline:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             output_path = self.config.processed_dir / f"ranking_{ts}_{run_id}.mp4"
 
-            total_video_steps = len(rank_segments) * 2 + 2
+            total_video_steps = 3
             video_step = [0]
 
             def on_video_step(step_msg: str) -> None:

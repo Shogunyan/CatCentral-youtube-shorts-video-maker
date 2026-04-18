@@ -1168,13 +1168,12 @@ def create_full_short_ranking_video(
     on_progress=None,
 ) -> None:
     """
-    Build a ranking Short by:
-      1. Blurring original creator's text regions (title bar + watermarks)
-      2. Rendering CatCentral's rank UI + watermark via Remotion on top
-         using startFrom to show each segment of the continuous source video.
+    Build a branded ranking Short:
+      1. Blur original creator's text regions (title bar + watermarks)
+      2. Add CatCentral watermark via ffmpeg drawtext
+    No Gemini segmentation required — the original Short is kept intact.
     """
-    if not rank_segments:
-        raise RuntimeError("No rank segments provided")
+    watermark_text = getattr(config, "watermark_text", "@CatCentral")
 
     # Step 1: blur original text regions
     if on_progress:
@@ -1182,28 +1181,18 @@ def create_full_short_ranking_video(
     blurred = source_path.with_name(f"_blurred_{source_path.stem}.mp4")
     _blur_text_regions(source_path, blurred)
 
-    # Step 2: probe actual duration
-    total_dur  = _probe_duration(blurred)
-    if not total_dur:
-        raise RuntimeError("Could not probe blurred source duration")
-
-    # Step 3: render via Remotion (reuse existing function with full-short params)
+    # Step 2: add watermark
     if on_progress:
-        on_progress(f"Rendering with Remotion ({total_dur:.0f}s video)…")
-
-    result = _render_full_short_with_remotion(
-        blurred_source=blurred,
-        rank_segments=rank_segments,
-        title=title,
-        output_path=output_path,
-        config=config,
-        on_progress=on_progress,
-    )
-
+        on_progress("Adding CatCentral watermark…")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    result = _add_watermark(blurred, output_path, watermark_text)
     blurred.unlink(missing_ok=True)
 
+    if on_progress:
+        on_progress("Done — video ready.")
+
     if not result or not result.exists():
-        raise RuntimeError("Remotion render failed for full-short mode")
+        raise RuntimeError("Watermark step failed for full-short mode")
 
 
 def _render_full_short_with_remotion(

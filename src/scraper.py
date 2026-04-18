@@ -1134,18 +1134,12 @@ class VideoScraper:
 
     def get_candidates(self, want: int = 25) -> list[dict]:
         """
-        Clone the single highest-viewed cat ranking Short we can find.
+        Find the best cat ranking Short and return it for direct download.
 
-        Strategy:
-          1. Find cat ranking Shorts (50K+ views); pick the #1 by view count.
-          2. Have Gemini watch it entirely — dense frame sampling detects every
-             rank-transition on screen.
-          3. Return the clips in the exact same order as the original
-             (start_time ascending = rank 5 first → rank 1 last), so the output
-             video mirrors the source in clip choice, timing, and sequence.
+        No Gemini analysis — just validate title + duration, then hand off
+        the full video to the downloader. The video is downloaded as-is,
+        original text regions are blurred, and our watermark is added.
         """
-        seen_ids: set[str] = set()
-
         # ── Find ranking videos ───────────────────────────────────────────────
         logger.info(f"Searching for cat ranking Shorts with {RANKING_MIN_VIEWS:,}+ views…")
         ranking_vids = self._find_ranking_videos(min_views=RANKING_MIN_VIEWS)
@@ -1160,46 +1154,31 @@ class VideoScraper:
             logger.warning("Could not find any cat ranking videos — returning empty")
             return []
 
-        # ── Clone the single highest-viewed ranking video ─────────────────────
-        # Try in view-count order until one yields clips (Gemini can fail on
-        # private / geo-blocked / deleted videos).
-        clips: list[dict] = []
+        # ── Pick the first valid Short (≤90s, available) ─────────────────────
         for rv in ranking_vids[:RANKING_ANALYSE_LIMIT]:
-            seen_ids.add(rv["id"])
-            logger.info(
-                f"Cloning: '{rv['title'][:60]}' ({rv['view_count']:,} views)"
-            )
-            clips = self._analyze_ranking_video(rv, seen_ids)
-            if clips:
-                logger.info(
-                    f"  ✓ {len(clips)} clips extracted from "
-                    f"'{rv['title'][:50]}'"
-                )
-                break
-            logger.info("  No clips — trying next ranking video…")
+            logger.info(f"Checking: '{rv['title'][:60]}' ({rv['view_count']:,} views)")
+            info = self._ydl_get_info(rv["url"])
+            if not info:
+                logger.info(f"  Skipping {rv['id']}: unavailable or rate-limited")
+                continue
+            rv_duration = info.get("duration") or 0
+            if not rv_duration or rv_duration > 90:
+                logger.info(f"  Skipping {rv['id']}: {rv_duration:.0f}s — not a Short")
+                continue
+            rv_views = info.get("view_count") or rv["view_count"]
+            if rv_views and rv_views < 1_000:
+                logger.info(f"  Skipping {rv['id']}: {rv_views} views — too low")
+                continue
+            logger.info(f"  ✓ Using '{rv['title'][:55]}' ({rv_views:,} views, {rv_duration:.0f}s)")
+            return [{
+                "id":             rv["id"],
+                "url":            rv["url"],
+                "platform":       "full_ranking_short",
+                "title":          rv["title"],
+                "view_count":     rv_views,
+                "_full_short":    True,
+                "_rank_segments": [],
+            }]
 
-        if not clips:
-            logger.warning(
-                "No clips extracted from any ranking video — "
-                "all were too long, unavailable, or failed analysis. "
-                "Pipeline will abort; no fallback to old clips."
-            )
-            return []
-
-        clips.sort(key=lambda c: c.get("start_time") or 0)
-        for c in clips:
-            c["_viral_score"] = self._viral_db.get_viral_score(c["id"])
-
-        rv_id  = clips[0].get("_ranking_vid_id", "")
-        rv_url = clips[0].get("url", "")
-        rv_views = clips[0].get("view_count", 0)
-
-        logger.info(f"Returning full-short item: {len(clips)} rank segments from {rv_id}")
-        return [{
-            "id":             rv_id,
-            "url":            rv_url,
-            "platform":       "full_ranking_short",
-            "view_count":     rv_views,
-            "_full_short":    True,
-            "_rank_segments": clips,
-        }]
+        logger.warning("No valid cat ranking Short found — pipeline will abort.")
+        return []
