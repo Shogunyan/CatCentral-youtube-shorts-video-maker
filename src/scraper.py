@@ -354,11 +354,6 @@ class VideoScraper:
                 if not vid_id or vid_id in seen:
                     continue
 
-                # Skip if yt-dlp explicitly identified this as a regular (non-Short) video
-                entry_url = e.get("url") or e.get("webpage_url") or ""
-                if entry_url and "/watch" in entry_url and "/shorts/" not in entry_url:
-                    continue
-
                 title = e.get("title", "")
                 if not _is_cat_video(title) or not _is_english(title):
                     continue
