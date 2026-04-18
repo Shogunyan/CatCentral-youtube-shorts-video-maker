@@ -1175,21 +1175,98 @@ def _extract_frame_ve(path: Path, timestamp: float) -> bytes | None:
     return None
 
 
+_OVERLAY_PROMPT = (
+    "Watch this entire cat ranking YouTube Short.\n"
+    "Identify EVERY text overlay, watermark, channel handle/logo, rank number or label, "
+    "and any UI element burned in by the original creator — including elements that only "
+    "appear briefly or fade in/out during the video.\n"
+    "Do NOT include the actual cat footage or video background.\n\n"
+    "For each element give its bounding box as a percentage of frame size (0–100).\n"
+    "If an element moves or appears at multiple positions, return one box per position.\n"
+    "Be generous — make each box ~10% larger than the visible element to ensure full coverage.\n\n"
+    "Reply ONLY with valid JSON (no markdown):\n"
+    '{"regions": [{"x": <left%>, "y": <top%>, "w": <width%>, "h": <height%>, "label": "<what it is>"}]}'
+)
+
+
+def _parse_overlay_regions(raw: str) -> list[tuple[int, int, int, int]]:
+    """Parse Gemini's JSON response into pixel (x, y, w, h) tuples."""
+    raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.MULTILINE)
+    raw = re.sub(r"\s*```\s*$", "", raw, flags=re.MULTILINE)
+    brace = raw.find("{")
+    if brace == -1:
+        return []
+    data = _json.loads(raw[brace:])
+    regions: list[tuple[int, int, int, int]] = []
+    pad = 12
+    for r in data.get("regions", []):
+        x = max(0,        int(r["x"] / 100 * 1080) - pad)
+        y = max(0,        int(r["y"] / 100 * 1920) - pad)
+        w = min(1080 - x, int(r["w"] / 100 * 1080) + pad * 2)
+        h = min(1920 - y, int(r["h"] / 100 * 1920) + pad * 2)
+        if w > 8 and h > 8:
+            label = r.get("label", "?")
+            logger.debug(f"    overlay: {label}  ({x},{y},{w},{h})")
+            regions.append((x, y, w, h))
+    return regions
+
+
 def _gemini_detect_overlays(path: Path, api_key: str) -> list[tuple[int, int, int, int]]:
     """
-    Sample frames from the source Short and ask Gemini Vision to pinpoint
-    every text overlay, watermark, rank number, and channel branding element.
+    Upload the full video to Gemini Files API so it can WATCH the entire Short
+    and identify every text overlay, watermark, and channel branding element —
+    including ones that only appear briefly or animate in/out.
 
-    Returns a list of (x, y, w, h) pixel coords in 1080×1920 space, padded
-    slightly so blurring fully covers each element. Falls back to [] on failure.
+    Falls back to frame-sampling if the Files API upload fails, and to [] if
+    Gemini is unavailable entirely. Never raises — safe to call unconditionally.
     """
+    # ── Attempt 1: full-video upload via Files API ────────────────────────────
+    try:
+        import time as _time
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(api_key=api_key)
+        logger.info("  Uploading Short to Gemini Files API for full-video analysis…")
+        video_file = client.files.upload(
+            path=str(path),
+            config=types.UploadFileConfig(mime_type="video/mp4"),
+        )
+        # Wait for processing (usually a few seconds for a Short)
+        for _ in range(30):
+            if video_file.state.name != "PROCESSING":
+                break
+            _time.sleep(1)
+            video_file = client.files.get(name=video_file.name)
+
+        if video_file.state.name == "FAILED":
+            raise RuntimeError("Gemini file processing failed")
+
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=[video_file, _OVERLAY_PROMPT],
+        )
+        try:
+            client.files.delete(name=video_file.name)
+        except Exception:
+            pass
+
+        regions = _parse_overlay_regions(response.text.strip())
+        logger.info(f"  Gemini (full video) detected {len(regions)} overlay region(s)")
+        return regions
+
+    except ImportError:
+        pass  # google-genai not available — fall through to frame sampling
+    except Exception as e:
+        logger.debug(f"Gemini Files API failed ({e}), falling back to frame sampling")
+
+    # ── Attempt 2: frame-sampling fallback (legacy SDK or Files API unavailable) ─
     try:
         duration = _probe_duration(path)
         if not duration or duration < 2:
             return []
 
-        # 6 frames spread through the video, avoiding first/last 0.5s
-        n = min(6, max(3, int(duration / 5)))
+        n = min(8, max(3, int(duration / 4)))
         margin = 0.5
         timestamps = [margin + (duration - 2 * margin) * i / max(1, n - 1) for i in range(n)]
 
@@ -1202,45 +1279,23 @@ def _gemini_detect_overlays(path: Path, api_key: str) -> list[tuple[int, int, in
         if len(frame_data) < 2:
             return []
 
-        prompt: list = [
+        parts: list = [
             "You are analyzing frames from a cat ranking YouTube Short (1080×1920 px).\n"
-            "Identify EVERY text overlay, watermark, channel handle, rank number/label, "
-            "logo, or UI element that is burned into the video by the original creator.\n"
-            "Do NOT include the actual cat footage or video background.\n\n"
-            "For each element give its bounding box as a percentage of frame dimensions (0–100).\n"
-            "Be generous — if unsure of exact bounds, make the box 10–15% larger on each side.\n\n"
-            "Reply ONLY with valid JSON (no markdown fences):\n"
-            '{"regions": [{"x": <left%>, "y": <top%>, "w": <width%>, "h": <height%>}]}\n\n'
-            f"Video is {duration:.0f}s. Frames sampled at: "
-            f"{', '.join(f'{t:.1f}s' for t, _ in frame_data)}\n",
+            + _OVERLAY_PROMPT
+            + f"\n\nVideo is {duration:.0f}s. Frames at: "
+            + ", ".join(f"{t:.1f}s" for t, _ in frame_data) + "\n",
         ]
         for ts, fb in frame_data:
-            prompt.append(f"\n[Frame at {ts:.1f}s]:")
-            prompt.append({"mime_type": "image/jpeg", "data": fb})
+            parts.append(f"\n[Frame at {ts:.1f}s]:")
+            parts.append({"mime_type": "image/jpeg", "data": fb})
 
-        raw = _gemini_generate_ve(api_key, "gemini-2.0-flash", prompt).strip()
-        raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.MULTILINE)
-        raw = re.sub(r"\s*```\s*$", "", raw, flags=re.MULTILINE)
-        brace = raw.find("{")
-        if brace == -1:
-            return []
-        data = _json.loads(raw[brace:])
-
-        regions: list[tuple[int, int, int, int]] = []
-        pad = 12  # extra pixels of padding around each detected element
-        for r in data.get("regions", []):
-            x = max(0,    int(r["x"] / 100 * 1080) - pad)
-            y = max(0,    int(r["y"] / 100 * 1920) - pad)
-            w = min(1080 - x, int(r["w"] / 100 * 1080) + pad * 2)
-            h = min(1920 - y, int(r["h"] / 100 * 1920) + pad * 2)
-            if w > 8 and h > 8:
-                regions.append((x, y, w, h))
-
-        logger.info(f"  Gemini detected {len(regions)} overlay region(s) to blur")
+        raw = _gemini_generate_ve(api_key, "gemini-2.0-flash", parts).strip()
+        regions = _parse_overlay_regions(raw)
+        logger.info(f"  Gemini (frame sampling) detected {len(regions)} overlay region(s)")
         return regions
 
     except Exception as e:
-        logger.debug(f"Gemini overlay detection failed: {e}")
+        logger.debug(f"Gemini frame-sampling fallback failed: {e}")
         return []
 
 
