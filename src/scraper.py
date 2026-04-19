@@ -27,7 +27,23 @@ MAX_CLIP_REUSE = 1          # block after first use; 14-day cooldown then resets
 RANKING_MIN_VIEWS = 50_000  # 50K+ views required to be considered
 RANKING_ANALYSE_LIMIT = 100  # how many ranking vids to scan before giving up
 
-# YouTube hashtag pages exclusively serve Shorts — 100% portrait content
+# Ranking-specific hashtag pages — YouTube only serves Shorts here (100% portrait)
+CAT_RANKING_HASHTAGS = [
+    "https://www.youtube.com/hashtag/top5cats",
+    "https://www.youtube.com/hashtag/top5funnycats",
+    "https://www.youtube.com/hashtag/top10cats",
+    "https://www.youtube.com/hashtag/catranking",
+    "https://www.youtube.com/hashtag/catsranked",
+    "https://www.youtube.com/hashtag/catcountdown",
+    "https://www.youtube.com/hashtag/catsranking",
+    "https://www.youtube.com/hashtag/top5catmoments",
+    "https://www.youtube.com/hashtag/funnycatmoments",
+    "https://www.youtube.com/hashtag/top3cats",
+    "https://www.youtube.com/hashtag/funnycatsranked",
+    "https://www.youtube.com/hashtag/catmoments",
+]
+
+# General cat Shorts hashtag pages — still 100% Shorts, but broader content
 CAT_SHORTS_HASHTAGS = [
     "https://www.youtube.com/hashtag/catsofyoutube",
     "https://www.youtube.com/hashtag/cats",
@@ -41,7 +57,25 @@ CAT_SHORTS_HASHTAGS = [
     "https://www.youtube.com/hashtag/catmoments",
 ]
 
-# Fallback queries for any cat Shorts (no ranking requirement)
+# Last-resort ytsearch queries — only used with strict ≤60s duration filter
+CAT_RANKING_QUERIES = [
+    "top 5 funniest cat moments",
+    "top 5 funny cat moments",
+    "top 5 cats",
+    "top 10 cats",
+    "top 5 funniest cats",
+    "top 5 cat moments",
+    "top 3 cats",
+    "cats ranked",
+    "cat ranking",
+    "funniest cats ranked",
+    "ranking cats",
+    "top 5 cats 2025",
+    "funniest cats countdown",
+    "cats ranked 5 to 1",
+]
+
+# Fallback queries for any cat Shorts (no ranking requirement, ytsearch last resort)
 CAT_ANY_SHORTS_QUERIES = [
     "funny cats shorts",
     "cute cats shorts",
@@ -49,48 +83,6 @@ CAT_ANY_SHORTS_QUERIES = [
     "kitten shorts",
     "cat moments shorts",
     "funniest cats shorts",
-    "cat fails shorts",
-    "cat compilation shorts",
-    "cats being funny shorts",
-    "cat videos shorts",
-]
-
-CAT_RANKING_QUERIES = [
-    # With #shorts tag — creators who make Shorts put this in title/tags; biases results toward Shorts
-    "top 5 cats #shorts",
-    "top 5 funniest cats #shorts",
-    "top 5 cat moments #shorts",
-    "top 10 cats #shorts",
-    "top 5 funniest cat moments #shorts",
-    "cats ranked #shorts",
-    "cat ranking #shorts",
-    "top 5 funny cats #shorts",
-    # Without hashtag — broader reach
-    "top 5 funniest cat moments",
-    "top 5 funny cat moments",
-    "top 5 cats",
-    "top 10 cats",
-    "top 5 funniest cats",
-    "top 10 funniest cats",
-    "top 5 cat moments",
-    "top 10 cat moments",
-    "top 5 kittens",
-    "top 3 cats",
-    "cats ranked",
-    "cats countdown",
-    "cat ranking",
-    "funniest cats ranked",
-    "cats worst to best",
-    "cats ranked worst to best",
-    "cats ranked funniest",
-    "ranking cats",
-    "top cats ranked",
-    "top 5 cats 2024",
-    "top 5 cats 2025",
-    "top 10 cats 2024",
-    "top 10 cats 2025",
-    "funniest cats countdown",
-    "cats ranked 5 to 1",
 ]
 
 
@@ -335,56 +327,87 @@ class VideoScraper:
     # ── Ranking-video search ──────────────────────────────────────────────────
 
     def _find_cat_shorts(self, min_views: int = RANKING_MIN_VIEWS) -> list[dict]:
-        """Search for cat ranking/compilation Shorts with at least min_views."""
+        """
+        Search for cat ranking Shorts.
+
+        Phase 1 — ranking-specific hashtag pages: YouTube ONLY serves Shorts on
+        hashtag pages, so every result here is guaranteed portrait.
+        Phase 2 — general cat Shorts hashtag pages with ranking title filter:
+        still 100% Shorts, broader pool.
+        Phase 3 — ytsearch50 as absolute last resort, but capped at 60s duration
+        to dramatically reduce landscape videos slipping through.
+        """
         seen: set[str] = set()
         found: list[dict] = []
 
-        queries = random.sample(CAT_RANKING_QUERIES, len(CAT_RANKING_QUERIES))
-        for q in queries:
-            if len(found) >= RANKING_ANALYSE_LIMIT * 3:
-                break
-            try:
-                entries = self._ydl_extract_flat(f"ytsearch50:{q}", playlist_end=50)
-            except Exception as ex:
-                logger.debug(f"Search failed '{q}': {ex}")
-                continue
-            before = len(found)
-            no_title = 0
-            for e in entries:
-                if not e:
-                    continue
-                vid_id = e.get("id", "")
-                if not vid_id or vid_id in seen:
-                    continue
-
-                title = e.get("title", "")
-                if not title:
-                    no_title += 1
-                    continue
+        def _accept(e: dict, require_ranking: bool, max_dur: int) -> bool:
+            """Return True and mutate found/seen if the entry should be kept."""
+            vid_id = e.get("id", "")
+            if not vid_id or vid_id in seen:
+                return False
+            title = e.get("title", "")
+            if title:
                 if not _is_cat_video(title) or not _is_english(title):
-                    continue
-                if not _is_ranking_short(title):
-                    continue
+                    return False
+                if require_ranking and not _is_ranking_short(title):
+                    return False
                 if _is_unwanted(title):
-                    continue
-                views = e.get("view_count") or 0
-                if views and views < min_views:
-                    continue
-                flat_dur = e.get("duration") or 0
-                if flat_dur and flat_dur > 180:
-                    continue
-                seen.add(vid_id)
-                found.append({
-                    "id":         vid_id,
-                    "url":        f"https://www.youtube.com/shorts/{vid_id}",
-                    "title":      title,
-                    "view_count": views,
-                    "duration":   flat_dur,
-                })
-            added = len(found) - before
-            logger.info(f"  '{q[:40]}' → {len(entries or [])} results ({no_title} no title), {added} passed ranking filter")
+                    return False
+            views = e.get("view_count") or 0
+            if views and views < min_views:
+                return False
+            flat_dur = e.get("duration") or 0
+            if flat_dur > max_dur:
+                return False
+            seen.add(vid_id)
+            found.append({
+                "id":         vid_id,
+                "url":        f"https://www.youtube.com/shorts/{vid_id}",
+                "title":      title or "(unknown)",
+                "view_count": views,
+                "duration":   flat_dur,
+            })
+            return True
 
-        # Sort: shortest duration first (most likely actual Shorts), then by views descending
+        # ── Phase 1: ranking hashtag pages (100% Shorts, apply ranking filter) ──
+        for ht_url in random.sample(CAT_RANKING_HASHTAGS, len(CAT_RANKING_HASHTAGS)):
+            if len(found) >= RANKING_ANALYSE_LIMIT:
+                break
+            entries = self._ydl_extract_flat(ht_url, playlist_end=50)
+            before = len(found)
+            for e in (entries or []):
+                _accept(e, require_ranking=True, max_dur=180)
+            tag = ht_url.split("/")[-1]
+            logger.info(f"  #Shorts hashtag #{tag} → {len(entries or [])} results, {len(found)-before} added")
+
+        # ── Phase 2: general cat Shorts hashtags (100% Shorts, ranking filter) ─
+        if len(found) < RANKING_ANALYSE_LIMIT:
+            for ht_url in random.sample(CAT_SHORTS_HASHTAGS, len(CAT_SHORTS_HASHTAGS)):
+                if len(found) >= RANKING_ANALYSE_LIMIT:
+                    break
+                entries = self._ydl_extract_flat(ht_url, playlist_end=50)
+                before = len(found)
+                for e in (entries or []):
+                    _accept(e, require_ranking=True, max_dur=180)
+                tag = ht_url.split("/")[-1]
+                logger.info(f"  #Shorts hashtag #{tag} → {len(entries or [])} results, {len(found)-before} added (ranking filter)")
+
+        # ── Phase 3: ytsearch last resort — strict 60s cap to avoid landscape ──
+        if len(found) < RANKING_ANALYSE_LIMIT // 2:
+            logger.info("  Hashtags insufficient — falling back to ytsearch (≤60s only)…")
+            for q in random.sample(CAT_RANKING_QUERIES, len(CAT_RANKING_QUERIES)):
+                if len(found) >= RANKING_ANALYSE_LIMIT:
+                    break
+                try:
+                    entries = self._ydl_extract_flat(f"ytsearch50:{q}", playlist_end=50)
+                except Exception as ex:
+                    logger.debug(f"Search failed '{q}': {ex}")
+                    continue
+                before = len(found)
+                for e in (entries or []):
+                    _accept(e, require_ranking=True, max_dur=60)
+                logger.info(f"  ytsearch '{q[:40]}' → {len(entries or [])} results, {len(found)-before} added (≤60s)")
+
         found.sort(key=lambda x: (x.get("duration") or 999, -x["view_count"]))
         logger.info(f"  Total: {len(found)} cat ranking Shorts with ≥{min_views:,} views")
         return found
@@ -429,7 +452,7 @@ class VideoScraper:
             tag = hashtag_url.split("/")[-1]
             logger.info(f"  Hashtag #{tag} → {len(entries or [])} results, {len(found)-before} added")
 
-        # Also search with any cat query (no ranking requirement)
+        # Last resort: ytsearch with very strict 60s cap (minimize landscape results)
         for q in random.sample(CAT_ANY_SHORTS_QUERIES, len(CAT_ANY_SHORTS_QUERIES)):
             if len(found) >= RANKING_ANALYSE_LIMIT * 2:
                 break
@@ -452,7 +475,7 @@ class VideoScraper:
                 if views and views < min_views:
                     continue
                 flat_dur = e.get("duration") or 0
-                if flat_dur and flat_dur > 180:
+                if flat_dur > 60:  # strict cap — ytsearch mixes landscape
                     continue
                 seen.add(vid_id)
                 found.append({
