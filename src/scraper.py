@@ -27,41 +27,37 @@ RANKING_MIN_VIEWS = 50_000  # 50K+ views required to be considered
 RANKING_ANALYSE_LIMIT = 50  # how many ranking vids to scan before giving up
 
 CAT_RANKING_QUERIES = [
-    # Explicit "Top N" — highest signal for numbered countdown format
-    "top 5 funniest cats shorts",
-    "top 10 funniest cats shorts",
+    # Short, creator-realistic titles → YouTube returns actual matching Shorts
+    "top 5 cats",
+    "top 10 cats",
+    "top 5 funniest cats",
+    "top 10 funniest cats",
+    "top 5 cat moments",
+    "top 10 cat moments",
+    "top 5 kittens",
+    "top 3 cats",
+    "cats ranked",
+    "cats countdown",
+    "cat ranking",
+    "funniest cats ranked",
+    "cats worst to best",
+    "cats ranked worst to best",
+    "cats ranked funniest",
+    "ranking cats",
     "top 5 cats shorts",
     "top 10 cats shorts",
+    "top 5 funniest cats shorts",
     "top 5 cat moments shorts",
-    "top 10 cat moments shorts",
-    "top 5 funniest kittens shorts",
-    "top 5 cats ranked shorts",
-    "top 10 cats ranked shorts",
-    "top 5 funny cat moments",
-    "top 10 funny cat moments",
+    "cats ranked shorts",
+    "top cats ranked",
     "top 5 cats 2024",
     "top 5 cats 2025",
     "top 10 cats 2024",
     "top 10 cats 2025",
-    # "ranked / countdown" with numbers
-    "cats ranked 5 to 1 shorts",
-    "cats ranked 10 to 1 shorts",
-    "funniest cats ranked 5 to 1",
-    "cat countdown top 5 shorts",
-    "cat countdown top 10 shorts",
-    # "worst to best" — explicit segment format
-    "cats worst to best shorts",
-    "cats ranked worst to best shorts",
-    "cat moments worst to best shorts",
-    # "ranking" + cats — good signal
-    "ranking top 5 cats shorts",
-    "ranking top 10 cats shorts",
-    "ranking funniest cats shorts",
-    "cat ranking top 5 shorts",
-    "cat ranking top 10 shorts",
-    # Year-tagged fresher content
-    "top 5 funniest cats 2024 shorts",
-    "top 5 funniest cats 2025 shorts",
+    "funniest cats countdown",
+    "cat countdown shorts",
+    "cats ranked 5 to 1",
+    "top 5 funny cat moments",
 ]
 
 
@@ -105,10 +101,14 @@ def _is_unwanted(title: str) -> bool:
     return any(kw in t for kw in BLOCK)
 
 
-# Explicit "top N" phrases — the strongest signal for a numbered countdown.
-_TOP_N = re.compile(
-    r'top\s*[0-9]+|#[0-9]+\s*to\s*#?[0-9]+|[0-9]+\s*to\s*1'
-    r'|worst\s*to\s*best|best\s*to\s*worst',
+_RANKING_SIGNAL = re.compile(
+    # Strong: explicit numbered countdown
+    r'top\s*[0-9]+'
+    r'|[0-9]+\s*to\s*1'
+    r'|#\s*[0-9]+\s*to'
+    r'|worst\s*to\s*best|best\s*to\s*worst'
+    # Weaker but acceptable: ranking/countdown language
+    r'|\b(ranked|ranking|countdown)\b',
     re.IGNORECASE,
 )
 
@@ -120,22 +120,21 @@ _RANKING_REJECT = {
     "episode", "episodes", "season",
     "hour", "hours", "playlist",
     "kiffness",
-    "compilation",   # plain compilation with no number = not a ranked countdown
 }
 
 
 def _is_ranking_short(title: str) -> bool:
     """
-    Return True only if the title is a genuine numbered cat countdown.
-    Requires an explicit "Top N" / "N to 1" / "worst to best" pattern —
-    'ranked' or 'funniest' alone are too vague and catch single-clip videos.
+    Return True if the title looks like a cat ranking/countdown Short.
+    Accepts: top N, N to 1, worst-to-best, ranked, ranking, countdown.
+    Portrait aspect-ratio check in get_candidates is the real Shorts gate.
     """
     if not title:
         return False
     t = title.lower()
     if not any(w in t for w in _CAT_WORDS):
         return False
-    if not _TOP_N.search(t):
+    if not _RANKING_SIGNAL.search(t):
         return False
     if any(w in t for w in _RANKING_REJECT):
         return False
@@ -311,12 +310,12 @@ class VideoScraper:
         for q in queries:
             if len(found) >= RANKING_ANALYSE_LIMIT * 3:
                 break
-            logger.info(f"  Searching: '{q[:55]}'")
             try:
                 entries = self._ydl_extract_flat(f"ytsearch50:{q}", playlist_end=50)
             except Exception as ex:
                 logger.debug(f"Search failed '{q}': {ex}")
                 continue
+            before = len(found)
             for e in entries:
                 if not e:
                     continue
@@ -344,9 +343,11 @@ class VideoScraper:
                     "title":      title,
                     "view_count": views,
                 })
+            added = len(found) - before
+            logger.info(f"  '{q[:40]}' → {len(entries or [])} results, {added} passed filter")
 
         found.sort(key=lambda x: x["view_count"], reverse=True)
-        logger.info(f"  Found {len(found)} cat ranking Shorts with ≥{min_views:,} views")
+        logger.info(f"  Total: {len(found)} cat ranking Shorts with ≥{min_views:,} views")
         return found
 
     # ── Main public API ───────────────────────────────────────────────────────
