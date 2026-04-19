@@ -26,41 +26,42 @@ MAX_CLIP_REUSE = 1          # block after first use; 14-day cooldown then resets
 RANKING_MIN_VIEWS = 50_000  # 50K+ views required to be considered
 RANKING_ANALYSE_LIMIT = 50  # how many ranking vids to scan before giving up
 
-CAT_SHORTS_QUERIES = [
-    # General viral / funny
-    "funny cat shorts",
-    "funny cats shorts 2024",
-    "funny cats shorts 2025",
-    "hilarious cat moments shorts",
-    "cat fails shorts",
-    "cats being cats shorts",
-    "viral cat video shorts",
-    "cats doing funny things shorts",
+CAT_RANKING_QUERIES = [
+    # "funniest" — high-volume, always returns cat countdowns
+    "funniest cats shorts",
+    "funniest cat moments shorts",
     "funniest cat clips shorts",
-    "unexpected cat moments shorts",
-    # Compilation / top lists
-    "top funniest cats shorts",
-    "top 5 funniest cats",
+    "funniest cats 2024",
+    "funniest cats 2025",
+    "funniest kittens shorts",
+    # "top N" — universally understood ranking signal
+    "top 5 funniest cats shorts",
+    "top 10 funniest cats shorts",
+    "top 5 cat moments shorts",
     "top 10 cat moments shorts",
-    "funniest cat compilation shorts",
-    "best cat moments shorts",
-    "cat moments compilation shorts",
-    "funny cat moments compilation",
-    "best funny cat videos shorts",
-    # Ranking style
-    "funniest cats ranked shorts",
+    "top 5 cats shorts",
+    "top cats shorts",
+    # "ranked / ranking" — explicit format signal
     "cats ranked funniest shorts",
-    "cat ranking countdown funny",
-    "cats ranked worst to funniest",
-    "ranking funniest cat moments",
-    "top cat clips ranked funny",
-    # Themed / trending
-    "cute cat shorts viral",
-    "cats gone wrong shorts",
-    "funny kitten shorts",
-    "cat humor shorts viral",
-    "silly cats shorts 2024",
-    "cats shorts funny viral 2025",
+    "funniest cats ranked shorts",
+    "cats ranked worst to best shorts",
+    "ranking funniest cats shorts",
+    "cat ranking countdown shorts",
+    "cats ranked funny 2024",
+    "cats ranked funny 2025",
+    # "best / countdown" — covers slightly different creator vocabulary
+    "best funny cat moments shorts",
+    "best cat moments shorts",
+    "cat countdown funny shorts",
+    "cats worst to best shorts",
+    # "compilation" — multi-clip format, works perfectly for rebranding
+    "funniest cat compilation shorts",
+    "funny cat compilation shorts",
+    "cat moments compilation shorts",
+    "hilarious cats compilation shorts",
+    # Year-tagged — surfaces fresher viral content
+    "funny cats ranked 2024",
+    "funny cats ranked 2025",
 ]
 
 
@@ -102,6 +103,41 @@ def _is_unwanted(title: str) -> bool:
         "sam & cat", "sam&cat", "episode", "season",
     ]
     return any(kw in t for kw in BLOCK)
+
+
+# Title must contain at least one of these to count as ranking/compilation content.
+_RANKING_WORDS = {
+    "ranked", "ranking", "countdown",
+    "top 5", "top5", "top 10", "top10", "top 3", "top3", "top 20",
+    "#1", "number 1", "number one",
+    "worst to best", "best to worst",
+    "funniest", "compilation", "best of", "best moments",
+}
+
+# Titles with any of these are always skipped even if ranking words appear.
+_RANKING_REJECT = {
+    "dog", "dogs", "puppy", "puppies",
+    "hamster", "rabbit", "bird", "parrot", "horse", "monkey",
+    "congress", "senator", "lawyer", "zoom call",
+    "nickelodeon", "netflix", "sam & cat", "sam&cat",
+    "episode", "episodes", "season",
+    "hour", "hours", "playlist",
+    "kiffness",
+}
+
+
+def _is_ranking_short(title: str) -> bool:
+    """Return True if the title looks like a cat ranking / compilation Short."""
+    if not title:
+        return False
+    t = title.lower()
+    if not any(w in t for w in _CAT_WORDS):
+        return False
+    if not any(w in t for w in _RANKING_WORDS):
+        return False
+    if any(w in t for w in _RANKING_REJECT):
+        return False
+    return True
 
 
 # Cat-related words that must appear in a video title for it to be accepted.
@@ -265,11 +301,11 @@ class VideoScraper:
     # ── Ranking-video search ──────────────────────────────────────────────────
 
     def _find_cat_shorts(self, min_views: int = RANKING_MIN_VIEWS) -> list[dict]:
-        """Search for popular cat Shorts with at least min_views."""
+        """Search for cat ranking/compilation Shorts with at least min_views."""
         seen: set[str] = set()
         found: list[dict] = []
 
-        queries = random.sample(CAT_SHORTS_QUERIES, len(CAT_SHORTS_QUERIES))
+        queries = random.sample(CAT_RANKING_QUERIES, len(CAT_RANKING_QUERIES))
         for q in queries:
             if len(found) >= RANKING_ANALYSE_LIMIT * 3:
                 break
@@ -289,6 +325,8 @@ class VideoScraper:
                 title = e.get("title", "")
                 if not _is_cat_video(title) or not _is_english(title):
                     continue
+                if not _is_ranking_short(title):
+                    continue
                 if _is_unwanted(title):
                     continue
                 views = e.get("view_count") or 0
@@ -306,7 +344,7 @@ class VideoScraper:
                 })
 
         found.sort(key=lambda x: x["view_count"], reverse=True)
-        logger.info(f"  Found {len(found)} cat Shorts with ≥{min_views:,} views")
+        logger.info(f"  Found {len(found)} cat ranking Shorts with ≥{min_views:,} views")
         return found
 
     # ── Main public API ───────────────────────────────────────────────────────
