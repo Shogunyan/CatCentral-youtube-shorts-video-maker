@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 MAX_CLIP_REUSE = 1          # block after first use; 14-day cooldown then resets it
 RANKING_MIN_VIEWS = 50_000  # 50K+ views required to be considered
-RANKING_ANALYSE_LIMIT = 50  # how many ranking vids to scan before giving up
+RANKING_ANALYSE_LIMIT = 100  # how many ranking vids to scan before giving up
 
 # YouTube hashtag pages exclusively serve Shorts — 100% portrait content
 CAT_SHORTS_HASHTAGS = [
@@ -56,7 +56,18 @@ CAT_ANY_SHORTS_QUERIES = [
 ]
 
 CAT_RANKING_QUERIES = [
-    # Short, creator-realistic titles → YouTube returns actual matching Shorts
+    # With #shorts tag — creators who make Shorts put this in title/tags; biases results toward Shorts
+    "top 5 cats #shorts",
+    "top 5 funniest cats #shorts",
+    "top 5 cat moments #shorts",
+    "top 10 cats #shorts",
+    "top 5 funniest cat moments #shorts",
+    "cats ranked #shorts",
+    "cat ranking #shorts",
+    "top 5 funny cats #shorts",
+    # Without hashtag — broader reach
+    "top 5 funniest cat moments",
+    "top 5 funny cat moments",
     "top 5 cats",
     "top 10 cats",
     "top 5 funniest cats",
@@ -73,20 +84,13 @@ CAT_RANKING_QUERIES = [
     "cats ranked worst to best",
     "cats ranked funniest",
     "ranking cats",
-    "top 5 cats shorts",
-    "top 10 cats shorts",
-    "top 5 funniest cats shorts",
-    "top 5 cat moments shorts",
-    "cats ranked shorts",
     "top cats ranked",
     "top 5 cats 2024",
     "top 5 cats 2025",
     "top 10 cats 2024",
     "top 10 cats 2025",
     "funniest cats countdown",
-    "cat countdown shorts",
     "cats ranked 5 to 1",
-    "top 5 funny cat moments",
 ]
 
 
@@ -340,12 +344,7 @@ class VideoScraper:
             if len(found) >= RANKING_ANALYSE_LIMIT * 3:
                 break
             try:
-                # sp=EgQQARgC = YouTube "Short videos" filter — returns only Shorts-eligible results
-                q_enc = urllib.parse.quote_plus(q)
-                shorts_url = f"https://www.youtube.com/results?search_query={q_enc}&sp=EgQQARgC"
-                entries = self._ydl_extract_flat(shorts_url, playlist_end=50)
-                if not entries:
-                    entries = self._ydl_extract_flat(f"ytsearch50:{q}", playlist_end=50)
+                entries = self._ydl_extract_flat(f"ytsearch50:{q}", playlist_end=50)
             except Exception as ex:
                 logger.debug(f"Search failed '{q}': {ex}")
                 continue
@@ -380,11 +379,13 @@ class VideoScraper:
                     "url":        f"https://www.youtube.com/shorts/{vid_id}",
                     "title":      title,
                     "view_count": views,
+                    "duration":   flat_dur,
                 })
             added = len(found) - before
             logger.info(f"  '{q[:40]}' → {len(entries or [])} results ({no_title} no title), {added} passed ranking filter")
 
-        found.sort(key=lambda x: x["view_count"], reverse=True)
+        # Sort: shortest duration first (most likely actual Shorts), then by views descending
+        found.sort(key=lambda x: (x.get("duration") or 999, -x["view_count"]))
         logger.info(f"  Total: {len(found)} cat ranking Shorts with ≥{min_views:,} views")
         return found
 
@@ -428,18 +429,12 @@ class VideoScraper:
             tag = hashtag_url.split("/")[-1]
             logger.info(f"  Hashtag #{tag} → {len(entries or [])} results, {len(found)-before} added")
 
-        # Also try Shorts-filtered search with any cat query (no ranking requirement)
+        # Also search with any cat query (no ranking requirement)
         for q in random.sample(CAT_ANY_SHORTS_QUERIES, len(CAT_ANY_SHORTS_QUERIES)):
             if len(found) >= RANKING_ANALYSE_LIMIT * 2:
                 break
             try:
-                q_enc = urllib.parse.quote_plus(q)
-                entries = self._ydl_extract_flat(
-                    f"https://www.youtube.com/results?search_query={q_enc}&sp=EgQQARgC",
-                    playlist_end=50,
-                )
-                if not entries:
-                    entries = self._ydl_extract_flat(f"ytsearch50:{q}", playlist_end=50)
+                entries = self._ydl_extract_flat(f"ytsearch50:{q}", playlist_end=50)
             except Exception as ex:
                 logger.debug(f"Fallback search failed '{q}': {ex}")
                 continue
