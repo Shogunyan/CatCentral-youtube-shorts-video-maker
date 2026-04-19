@@ -13,6 +13,7 @@ import os
 import random
 import re
 import time
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -311,7 +312,12 @@ class VideoScraper:
             if len(found) >= RANKING_ANALYSE_LIMIT * 3:
                 break
             try:
-                entries = self._ydl_extract_flat(f"ytsearch50:{q}", playlist_end=50)
+                # sp=EgQQARgC = YouTube "Short videos" filter — returns only Shorts-eligible results
+                q_enc = urllib.parse.quote_plus(q)
+                shorts_url = f"https://www.youtube.com/results?search_query={q_enc}&sp=EgQQARgC"
+                entries = self._ydl_extract_flat(shorts_url, playlist_end=50)
+                if not entries:
+                    entries = self._ydl_extract_flat(f"ytsearch50:{q}", playlist_end=50)
             except Exception as ex:
                 logger.debug(f"Search failed '{q}': {ex}")
                 continue
