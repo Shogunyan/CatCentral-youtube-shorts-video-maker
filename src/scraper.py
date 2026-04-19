@@ -27,6 +27,34 @@ MAX_CLIP_REUSE = 1          # block after first use; 14-day cooldown then resets
 RANKING_MIN_VIEWS = 50_000  # 50K+ views required to be considered
 RANKING_ANALYSE_LIMIT = 50  # how many ranking vids to scan before giving up
 
+# YouTube hashtag pages exclusively serve Shorts — 100% portrait content
+CAT_SHORTS_HASHTAGS = [
+    "https://www.youtube.com/hashtag/catsofyoutube",
+    "https://www.youtube.com/hashtag/cats",
+    "https://www.youtube.com/hashtag/catshorts",
+    "https://www.youtube.com/hashtag/funnycat",
+    "https://www.youtube.com/hashtag/funnycats",
+    "https://www.youtube.com/hashtag/cutecats",
+    "https://www.youtube.com/hashtag/kitten",
+    "https://www.youtube.com/hashtag/kittens",
+    "https://www.youtube.com/hashtag/catvideos",
+    "https://www.youtube.com/hashtag/catmoments",
+]
+
+# Fallback queries for any cat Shorts (no ranking requirement)
+CAT_ANY_SHORTS_QUERIES = [
+    "funny cats shorts",
+    "cute cats shorts",
+    "cats shorts",
+    "kitten shorts",
+    "cat moments shorts",
+    "funniest cats shorts",
+    "cat fails shorts",
+    "cat compilation shorts",
+    "cats being funny shorts",
+    "cat videos shorts",
+]
+
 CAT_RANKING_QUERIES = [
     # Short, creator-realistic titles → YouTube returns actual matching Shorts
     "top 5 cats",
@@ -322,6 +350,7 @@ class VideoScraper:
                 logger.debug(f"Search failed '{q}': {ex}")
                 continue
             before = len(found)
+            no_title = 0
             for e in entries:
                 if not e:
                     continue
@@ -330,6 +359,9 @@ class VideoScraper:
                     continue
 
                 title = e.get("title", "")
+                if not title:
+                    no_title += 1
+                    continue
                 if not _is_cat_video(title) or not _is_english(title):
                     continue
                 if not _is_ranking_short(title):
@@ -350,10 +382,94 @@ class VideoScraper:
                     "view_count": views,
                 })
             added = len(found) - before
-            logger.info(f"  '{q[:40]}' → {len(entries or [])} results, {added} passed filter")
+            logger.info(f"  '{q[:40]}' → {len(entries or [])} results ({no_title} no title), {added} passed ranking filter")
 
         found.sort(key=lambda x: x["view_count"], reverse=True)
         logger.info(f"  Total: {len(found)} cat ranking Shorts with ≥{min_views:,} views")
+        return found
+
+    def _find_any_cat_shorts(self, min_views: int = 10_000) -> list[dict]:
+        """
+        Fallback: find ANY popular cat Shorts without ranking title requirement.
+        Tries YouTube hashtag pages first (100% Shorts by design), then
+        Shorts-filtered search with relaxed cat-only title check.
+        """
+        seen: set[str] = set()
+        found: list[dict] = []
+
+        # Hashtag pages on YouTube exclusively serve Shorts
+        for hashtag_url in random.sample(CAT_SHORTS_HASHTAGS, len(CAT_SHORTS_HASHTAGS)):
+            if len(found) >= RANKING_ANALYSE_LIMIT:
+                break
+            entries = self._ydl_extract_flat(hashtag_url, playlist_end=30)
+            before = len(found)
+            for e in (entries or []):
+                if not e:
+                    continue
+                vid_id = e.get("id", "")
+                if not vid_id or vid_id in seen:
+                    continue
+                title = e.get("title", "")
+                if title and (not _is_cat_video(title) or not _is_english(title) or _is_unwanted(title)):
+                    continue
+                views = e.get("view_count") or 0
+                if views and views < min_views:
+                    continue
+                flat_dur = e.get("duration") or 0
+                if flat_dur and flat_dur > 180:
+                    continue
+                seen.add(vid_id)
+                found.append({
+                    "id":         vid_id,
+                    "url":        f"https://www.youtube.com/shorts/{vid_id}",
+                    "title":      title or "(unknown)",
+                    "view_count": views,
+                })
+            tag = hashtag_url.split("/")[-1]
+            logger.info(f"  Hashtag #{tag} → {len(entries or [])} results, {len(found)-before} added")
+
+        # Also try Shorts-filtered search with any cat query (no ranking requirement)
+        for q in random.sample(CAT_ANY_SHORTS_QUERIES, len(CAT_ANY_SHORTS_QUERIES)):
+            if len(found) >= RANKING_ANALYSE_LIMIT * 2:
+                break
+            try:
+                q_enc = urllib.parse.quote_plus(q)
+                entries = self._ydl_extract_flat(
+                    f"https://www.youtube.com/results?search_query={q_enc}&sp=EgQQARgC",
+                    playlist_end=50,
+                )
+                if not entries:
+                    entries = self._ydl_extract_flat(f"ytsearch50:{q}", playlist_end=50)
+            except Exception as ex:
+                logger.debug(f"Fallback search failed '{q}': {ex}")
+                continue
+            before = len(found)
+            for e in (entries or []):
+                if not e:
+                    continue
+                vid_id = e.get("id", "")
+                if not vid_id or vid_id in seen:
+                    continue
+                title = e.get("title", "")
+                if title and (not _is_cat_video(title) or not _is_english(title) or _is_unwanted(title)):
+                    continue
+                views = e.get("view_count") or 0
+                if views and views < min_views:
+                    continue
+                flat_dur = e.get("duration") or 0
+                if flat_dur and flat_dur > 180:
+                    continue
+                seen.add(vid_id)
+                found.append({
+                    "id":         vid_id,
+                    "url":        f"https://www.youtube.com/shorts/{vid_id}",
+                    "title":      title or "(unknown)",
+                    "view_count": views,
+                })
+            logger.info(f"  Fallback '{q[:40]}' → {len(entries or [])} results, {len(found)-before} added")
+
+        found.sort(key=lambda x: x["view_count"], reverse=True)
+        logger.info(f"  Fallback total: {len(found)} any-cat Shorts with ≥{min_views:,} views")
         return found
 
     # ── Main public API ───────────────────────────────────────────────────────
@@ -376,6 +492,14 @@ class VideoScraper:
         if not ranking_vids:
             logger.info("Still none — widening to 10K+…")
             ranking_vids = self._find_cat_shorts(min_views=10_000)
+
+        # Ranking search exhausted — fall back to any popular cat Shorts
+        if not ranking_vids:
+            logger.info("Ranking search found nothing — falling back to any cat Shorts (10K+ views)…")
+            ranking_vids = self._find_any_cat_shorts(min_views=10_000)
+        if not ranking_vids:
+            logger.info("Still none — trying any cat Short (5K+ views)…")
+            ranking_vids = self._find_any_cat_shorts(min_views=5_000)
         if not ranking_vids:
             logger.warning("Could not find any cat Shorts — returning empty")
             return []
