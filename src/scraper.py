@@ -27,41 +27,41 @@ RANKING_MIN_VIEWS = 50_000  # 50K+ views required to be considered
 RANKING_ANALYSE_LIMIT = 50  # how many ranking vids to scan before giving up
 
 CAT_RANKING_QUERIES = [
-    # "funniest" — high-volume, always returns cat countdowns
-    "funniest cats shorts",
-    "funniest cat moments shorts",
-    "funniest cat clips shorts",
-    "funniest cats 2024",
-    "funniest cats 2025",
-    "funniest kittens shorts",
-    # "top N" — universally understood ranking signal
+    # Explicit "Top N" — highest signal for numbered countdown format
     "top 5 funniest cats shorts",
     "top 10 funniest cats shorts",
+    "top 5 cats shorts",
+    "top 10 cats shorts",
     "top 5 cat moments shorts",
     "top 10 cat moments shorts",
-    "top 5 cats shorts",
-    "top cats shorts",
-    # "ranked / ranking" — explicit format signal
-    "cats ranked funniest shorts",
-    "funniest cats ranked shorts",
-    "cats ranked worst to best shorts",
-    "ranking funniest cats shorts",
-    "cat ranking countdown shorts",
-    "cats ranked funny 2024",
-    "cats ranked funny 2025",
-    # "best / countdown" — covers slightly different creator vocabulary
-    "best funny cat moments shorts",
-    "best cat moments shorts",
-    "cat countdown funny shorts",
+    "top 5 funniest kittens shorts",
+    "top 5 cats ranked shorts",
+    "top 10 cats ranked shorts",
+    "top 5 funny cat moments",
+    "top 10 funny cat moments",
+    "top 5 cats 2024",
+    "top 5 cats 2025",
+    "top 10 cats 2024",
+    "top 10 cats 2025",
+    # "ranked / countdown" with numbers
+    "cats ranked 5 to 1 shorts",
+    "cats ranked 10 to 1 shorts",
+    "funniest cats ranked 5 to 1",
+    "cat countdown top 5 shorts",
+    "cat countdown top 10 shorts",
+    # "worst to best" — explicit segment format
     "cats worst to best shorts",
-    # "compilation" — multi-clip format, works perfectly for rebranding
-    "funniest cat compilation shorts",
-    "funny cat compilation shorts",
-    "cat moments compilation shorts",
-    "hilarious cats compilation shorts",
-    # Year-tagged — surfaces fresher viral content
-    "funny cats ranked 2024",
-    "funny cats ranked 2025",
+    "cats ranked worst to best shorts",
+    "cat moments worst to best shorts",
+    # "ranking" + cats — good signal
+    "ranking top 5 cats shorts",
+    "ranking top 10 cats shorts",
+    "ranking funniest cats shorts",
+    "cat ranking top 5 shorts",
+    "cat ranking top 10 shorts",
+    # Year-tagged fresher content
+    "top 5 funniest cats 2024 shorts",
+    "top 5 funniest cats 2025 shorts",
 ]
 
 
@@ -105,16 +105,17 @@ def _is_unwanted(title: str) -> bool:
     return any(kw in t for kw in BLOCK)
 
 
-# Title must contain at least one of these to count as ranking/compilation content.
-_RANKING_WORDS = {
-    "ranked", "ranking", "countdown",
-    "top 5", "top5", "top 10", "top10", "top 3", "top3", "top 20",
-    "#1", "number 1", "number one",
+# Must contain an explicit numeric ranking indicator — ensures the video is a
+# proper numbered countdown ("Top 5", "5 to 1", etc.) not a single clip.
+_NUMERIC_RANKING = {
+    "top 5", "top5", "top 10", "top10", "top 3", "top3",
+    "top 7", "top7", "top 15", "top 20",
+    "#5", "#10", "#3",
+    "5 to 1", "10 to 1", "3 to 1",
     "worst to best", "best to worst",
-    "funniest", "compilation", "best of", "best moments",
+    "ranked", "ranking", "countdown",
 }
 
-# Titles with any of these are always skipped even if ranking words appear.
 _RANKING_REJECT = {
     "dog", "dogs", "puppy", "puppies",
     "hamster", "rabbit", "bird", "parrot", "horse", "monkey",
@@ -127,13 +128,13 @@ _RANKING_REJECT = {
 
 
 def _is_ranking_short(title: str) -> bool:
-    """Return True if the title looks like a cat ranking / compilation Short."""
+    """Return True only if title is a numbered cat countdown Short."""
     if not title:
         return False
     t = title.lower()
     if not any(w in t for w in _CAT_WORDS):
         return False
-    if not any(w in t for w in _RANKING_WORDS):
+    if not any(w in t for w in _NUMERIC_RANKING):
         return False
     if any(w in t for w in _RANKING_REJECT):
         return False

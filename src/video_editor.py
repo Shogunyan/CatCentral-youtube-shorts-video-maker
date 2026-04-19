@@ -208,14 +208,26 @@ def _easyocr_detect_overlays(path: Path) -> list[tuple[int, int, int, int]]:
 
         merged = _merge_regions(raw_regions)
 
-        # Drop regions already fully covered by the baseline blur zones:
-        #   top 160px | bottom from y=1700 | left 70px
-        final = [
-            (x, y, w, h) for x, y, w, h in merged
-            if not (y + h <= 160 or y >= 1700 or x + w <= 70)
-        ]
+        final = []
+        for x, y, w, h in merged:
+            # Skip anything already covered by the fixed top/bottom blur
+            if y + h <= 160 or y >= 1700:
+                continue
+            # Only blur text that sits near an edge — genuine channel watermarks
+            # live in corners. Big centred rank numbers ("5", "TOP 5") are content,
+            # not watermarks, so we must not blur them.
+            near_left   = x < 180
+            near_right  = x + w > 900
+            near_top    = y < 350
+            near_bottom = y + h > 1500
+            if not (near_left or near_right or near_top or near_bottom):
+                continue
+            # Also skip very large regions — those are content cards, not overlays
+            if w > 500 or h > 200:
+                continue
+            final.append((x, y, w, h))
 
-        logger.info(f"  EasyOCR detected {len(final)} mid-frame overlay region(s)")
+        logger.info(f"  EasyOCR detected {len(final)} edge watermark region(s)")
         return final
 
     except Exception as e:
@@ -271,11 +283,11 @@ def _strip_emoji(text: str) -> str:
 
 def _blur_text_regions(src: Path, dst: Path) -> None:
     """
-    Scale to 1080×1920 and blur the original creator's text regions:
-      • Top 160px        — title bar / channel name header
-      • Bottom 220px     — username, music info, like/comment/share buttons
-      • Left 70px strip  — side rank panels (common in ranking Shorts)
-    Uses gblur (gaussian) — boxblur's chroma radius is capped at 17 in ffmpeg.
+    Scale to 1080×1920 and blur only the original creator's UI chrome:
+      • Top 160px   — channel name / title bar
+      • Bottom 220px — username, music info, like/comment/share buttons
+    The centre of the video (rank numbers, clip content) is left untouched.
+    Uses gblur (gaussian) — boxblur chroma radius is capped at 17 in ffmpeg.
     Audio is stream-copied (no re-encode).
     """
     _ffmpeg(
@@ -284,16 +296,13 @@ def _blur_text_regions(src: Path, dst: Path) -> None:
         (
             "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
             "crop=1080:1920[scaled];"
-            "[scaled]split=4[v1][v2][v3][v4];"
+            "[scaled]split=3[v1][v2][v3];"
             # Top 160px — header/title bar
             "[v2]crop=1080:160:0:0,gblur=sigma=20[btop];"
             # Bottom 220px — username, music, action buttons
             "[v3]crop=1080:220:0:1700,gblur=sigma=20[bbot];"
-            # Left 70px strip — side rank number panels
-            "[v4]crop=70:1920:0:0,gblur=sigma=20[bleft];"
             "[v1][btop]overlay=0:0[o1];"
-            "[o1][bbot]overlay=0:1700[o2];"
-            "[o2][bleft]overlay=0:0[out]"
+            "[o1][bbot]overlay=0:1700[out]"
         ),
         "-map", "[out]", "-map", "0:a?",
         "-c:v", VIDEO_CODEC, "-crf", "18", "-preset", "fast",
