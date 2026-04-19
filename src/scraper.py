@@ -388,6 +388,14 @@ class VideoScraper:
             if not info:
                 logger.info(f"  Skipping {rv_id}: unavailable or rate-limited")
                 continue
+
+            # ── Portrait-only gate: Shorts are ALWAYS taller than wide ─────────
+            rv_w = info.get("width") or 0
+            rv_h = info.get("height") or 0
+            if rv_w and rv_h and rv_w >= rv_h:
+                logger.info(f"  Skipping {rv_id}: landscape video ({rv_w}×{rv_h}) — not a Short")
+                continue
+
             rv_duration = info.get("duration") or 0
             if not rv_duration or rv_duration > 180:
                 logger.info(f"  Skipping {rv_id}: {rv_duration:.0f}s — not a Short")
@@ -396,7 +404,8 @@ class VideoScraper:
             if not rv_views or rv_views < 1_000:
                 logger.info(f"  Skipping {rv_id}: {rv_views} views — too low")
                 continue
-            logger.info(f"  ✓ Using '{rv['title'][:55]}' ({rv_views:,} views, {rv_duration:.0f}s)")
+            dims = f"{rv_w}×{rv_h}" if rv_w and rv_h else "portrait"
+            logger.info(f"  ✓ Using '{rv['title'][:55]}' ({rv_views:,} views, {rv_duration:.0f}s, {dims})")
             return [{
                 "id":             rv_id,
                 "url":            rv["url"],
