@@ -22,7 +22,7 @@ from .viral_db import ViralClipDB
 
 logger = logging.getLogger(__name__)
 
-MAX_CLIP_REUSE = 3          # allow up to 3 uses before 14-day cooldown kicks in
+MAX_CLIP_REUSE = 1          # block after first use; 14-day cooldown then resets it
 RANKING_MIN_VIEWS = 50_000  # 50K+ views required to be considered
 RANKING_ANALYSE_LIMIT = 50  # how many ranking vids to scan before giving up
 
@@ -333,8 +333,11 @@ class VideoScraper:
             logger.warning("Could not find any cat Shorts — returning empty")
             return []
 
-        # ── Pick the first valid, unused Short (≤180s, available) ───────────────
-        for rv in ranking_vids[:RANKING_ANALYSE_LIMIT]:
+        # ── Pick a random unused Short from the top candidates ───────────────────
+        # Shuffle the top N so we don't always pick the same #1 most-viewed video.
+        top = ranking_vids[:RANKING_ANALYSE_LIMIT]
+        random.shuffle(top)
+        for rv in top:
             rv_id = rv["id"]
             # Skip Shorts we've used MAX_CLIP_REUSE times (reset after 14 days)
             if self._is_used(rv_id):
