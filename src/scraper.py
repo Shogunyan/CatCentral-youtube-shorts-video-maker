@@ -105,16 +105,12 @@ def _is_unwanted(title: str) -> bool:
     return any(kw in t for kw in BLOCK)
 
 
-# Must contain an explicit numeric ranking indicator — ensures the video is a
-# proper numbered countdown ("Top 5", "5 to 1", etc.) not a single clip.
-_NUMERIC_RANKING = {
-    "top 5", "top5", "top 10", "top10", "top 3", "top3",
-    "top 7", "top7", "top 15", "top 20",
-    "#5", "#10", "#3",
-    "5 to 1", "10 to 1", "3 to 1",
-    "worst to best", "best to worst",
-    "ranked", "ranking", "countdown",
-}
+# Explicit "top N" phrases — the strongest signal for a numbered countdown.
+_TOP_N = re.compile(
+    r'top\s*[0-9]+|#[0-9]+\s*to\s*#?[0-9]+|[0-9]+\s*to\s*1'
+    r'|worst\s*to\s*best|best\s*to\s*worst',
+    re.IGNORECASE,
+)
 
 _RANKING_REJECT = {
     "dog", "dogs", "puppy", "puppies",
@@ -124,17 +120,22 @@ _RANKING_REJECT = {
     "episode", "episodes", "season",
     "hour", "hours", "playlist",
     "kiffness",
+    "compilation",   # plain compilation with no number = not a ranked countdown
 }
 
 
 def _is_ranking_short(title: str) -> bool:
-    """Return True only if title is a numbered cat countdown Short."""
+    """
+    Return True only if the title is a genuine numbered cat countdown.
+    Requires an explicit "Top N" / "N to 1" / "worst to best" pattern —
+    'ranked' or 'funniest' alone are too vague and catch single-clip videos.
+    """
     if not title:
         return False
     t = title.lower()
     if not any(w in t for w in _CAT_WORDS):
         return False
-    if not any(w in t for w in _NUMERIC_RANKING):
+    if not _TOP_N.search(t):
         return False
     if any(w in t for w in _RANKING_REJECT):
         return False
