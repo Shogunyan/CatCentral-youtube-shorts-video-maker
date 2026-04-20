@@ -408,7 +408,7 @@ class YouTubeUploader:
                 )
                 page.wait_for_selector(create_sel, timeout=20_000)
                 page.click(create_sel)
-                page.wait_for_timeout(800)
+                page.wait_for_timeout(1_200)
                 _ss("11_create_clicked")
 
                 upload_sel = (
@@ -416,41 +416,65 @@ class YouTubeUploader:
                     'yt-formatted-string:has-text("Upload videos"), '
                     'a:has-text("Upload videos")'
                 )
-                page.wait_for_selector(upload_sel, timeout=10_000)
+                page.wait_for_selector(upload_sel, timeout=15_000)
                 page.click(upload_sel)
-                page.wait_for_timeout(1_000)
+                page.wait_for_timeout(1_500)
+                _ss("11b_upload_clicked")
+
+                # ── Verify upload file-select dialog opened ────────────────────
+                dialog_ready_sel = (
+                    '#select-files-button, '
+                    'ytcp-file-upload, '
+                    'ytcp-upload-dialog, '
+                    '#upload-dialog'
+                )
+                try:
+                    page.wait_for_selector(dialog_ready_sel, timeout=15_000)
+                    logger.info("  Upload dialog open")
+                except PWTimeout:
+                    _ss("12_no_dialog")
+                    logger.error(
+                        f"  Upload file-select dialog never opened — "
+                        f"URL: {page.url[:120]}"
+                    )
+                    return None
                 _ss("12_upload_dialog")
 
-                # ── Select the file ────────────────────────────────────────────
-                # Prefer setting directly on the hidden <input type="file"> —
-                # more reliable than triggering a file-chooser dialog.
-                page.wait_for_timeout(1_000)
-                file_input = page.locator('input[type="file"]')
-                if file_input.count() > 0:
-                    file_input.first.set_input_files(str(video_path))
-                    logger.info(f"  File set via input: {video_path.name}")
-                else:
-                    file_btn_sel = '#select-files-button, button:has-text("SELECT FILES")'
-                    with page.expect_file_chooser(timeout=15_000) as fc_info:
-                        page.click(file_btn_sel, timeout=10_000)
-                    fc_info.value.set_files(str(video_path))
+                # ── Select the file via file-chooser (triggers YouTube's upload) ─
+                try:
+                    with page.expect_file_chooser(timeout=15_000) as fc:
+                        page.click('#select-files-button', timeout=10_000)
+                    fc.value.set_files(str(video_path))
                     logger.info(f"  File set via chooser: {video_path.name}")
+                except Exception as chooser_err:
+                    logger.warning(f"  File chooser failed ({chooser_err}) — trying direct input")
+                    page.locator('input[type="file"]').first.set_input_files(str(video_path))
+                    logger.info(f"  File set via input: {video_path.name}")
                 _ss("13_file_set")
                 page.wait_for_timeout(3_000)
                 _ss("13b_processing")
 
-                # ── Details form ───────────────────────────────────────────────
-                # Wait for the title input — more reliable than the wrapper element.
-                # Use state='attached' so we don't fail if it's in the DOM but
-                # not yet fully rendered.
+                # ── Wait for details panel (try each selector in order) ────────
                 logger.info("  Waiting for upload details panel…")
-                title_input_sel = '#title-textarea #textbox, #title-textarea ytcp-ve #textbox'
-                try:
-                    page.wait_for_selector(
-                        'ytcp-uploads-details', state='attached', timeout=120_000
-                    )
-                except PWTimeout:
-                    _ss("14_details_timeout")
+                DETAIL_SELS = [
+                    ('ytcp-uploads-details',         90_000),
+                    ('ytcp-video-metadata-editor',   20_000),
+                    ('#title-textarea',              20_000),
+                    ('ytcp-form-input-container',    20_000),
+                ]
+                details_appeared = False
+                for idx, (sel, tmo) in enumerate(DETAIL_SELS):
+                    try:
+                        page.wait_for_selector(sel, state='attached', timeout=tmo)
+                        logger.info(f"  Details panel found: {sel}")
+                        details_appeared = True
+                        break
+                    except PWTimeout:
+                        _ss(f"14_try{idx}_timeout")
+                        continue
+
+                if not details_appeared:
+                    _ss("14_details_never_appeared")
                     logger.error(
                         f"  Upload details panel never appeared — URL: {page.url[:120]}"
                     )
