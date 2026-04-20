@@ -482,35 +482,85 @@ class YouTubeUploader:
                 page.wait_for_timeout(2_000)
                 _ss("14_details_form")
 
-                title_sel = '#title-textarea #textbox'
-                page.wait_for_selector(title_sel, timeout=15_000)
-                page.click(title_sel)
-                page.keyboard.press("Control+a")
-                page.keyboard.type(title, delay=25)
+                # ── Fill title ─────────────────────────────────────────────────
+                title_typed = False
+                for t_sel in [
+                    '#title-textarea #textbox',
+                    '#title-textarea ytcp-ve #textbox',
+                    'ytcp-form-input-container[id="title-textarea"] #textbox',
+                ]:
+                    try:
+                        page.wait_for_selector(t_sel, timeout=8_000)
+                        page.click(t_sel)
+                        page.keyboard.press("Control+a")
+                        page.keyboard.type(title, delay=25)
+                        title_typed = True
+                        logger.info("  Title filled")
+                        break
+                    except PWTimeout:
+                        continue
+                if not title_typed:
+                    logger.warning("  Title field not found — uploading without title change")
 
-                desc_sel = '#description-textarea #textbox'
-                page.wait_for_selector(desc_sel, timeout=10_000)
-                page.click(desc_sel)
-                page.keyboard.type(description[:4900], delay=3)
+                # ── Fill description ───────────────────────────────────────────
+                for d_sel in [
+                    '#description-textarea #textbox',
+                    '#description-textarea ytcp-ve #textbox',
+                    'ytcp-form-input-container[id="description-textarea"] #textbox',
+                ]:
+                    try:
+                        page.wait_for_selector(d_sel, timeout=8_000)
+                        page.click(d_sel)
+                        page.keyboard.type(description[:4900], delay=3)
+                        logger.info("  Description filled")
+                        break
+                    except PWTimeout:
+                        continue
+
                 _ss("15_details_filled")
 
-                # ── Walk wizard steps (Next × up to 3) ────────────────────────
-                for step in range(3):
-                    next_btn = page.locator('ytcp-button#next-button')
-                    if next_btn.is_visible():
+                # ── Walk wizard (Next × up to 4 steps) ────────────────────────
+                for step in range(4):
+                    try:
+                        next_btn = page.locator('ytcp-button#next-button')
+                        next_btn.wait_for(state='visible', timeout=3_000)
                         next_btn.click()
-                        logger.info(f"  Wizard step {step + 1} → Next")
-                    page.wait_for_timeout(1_500)
+                        logger.info(f"  Wizard step {step + 1}: Next clicked")
+                        page.wait_for_timeout(1_500)
+                    except Exception:
+                        break  # no more Next buttons — we're on the last page
 
                 # ── Visibility → Public ────────────────────────────────────────
-                page.wait_for_selector('ytcp-video-visibility-select', timeout=20_000)
-                _ss("16_visibility_page")
-                page.click('tp-yt-paper-radio-button[name="PUBLIC"]')
-                page.wait_for_timeout(700)
-                _ss("17_visibility_public")
+                try:
+                    page.wait_for_selector('ytcp-video-visibility-select', timeout=20_000)
+                    _ss("16_visibility_page")
+                except PWTimeout:
+                    _ss("16_no_visibility_page")
+                    logger.error("  Visibility page never appeared — check /tmp/yt_upload_*.png")
+                    return None
 
-                # ── Publish ────────────────────────────────────────────────────
-                page.click('ytcp-button#done-button', timeout=10_000)
+                page.click('tp-yt-paper-radio-button[name="PUBLIC"]')
+                page.wait_for_timeout(800)
+                _ss("17_public_set")
+
+                # ── Wait for Done button to be enabled ─────────────────────────
+                done_btn = page.locator('ytcp-button#done-button')
+                try:
+                    done_btn.wait_for(state='visible', timeout=30_000)
+                except PWTimeout:
+                    _ss("18_no_done_button")
+                    logger.error("  Done/Publish button never appeared")
+                    return None
+
+                # YouTube disables the button while the video is still processing.
+                # Poll for up to 60 s until it's clickable.
+                for _ in range(60):
+                    if done_btn.get_attribute('disabled') is None:
+                        break
+                    logger.info("  Waiting for upload to finish processing…")
+                    page.wait_for_timeout(1_000)
+
+                done_btn.click()
                 logger.info("  Publish clicked — waiting for confirmation…")
                 page.wait_for_timeout(8_000)
                 _ss("18_published")
