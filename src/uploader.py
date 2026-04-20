@@ -252,13 +252,11 @@ class YouTubeUploader:
         description: str,
     ) -> str | None:
         """
-        Upload via Chromium when the YouTube API quota is exceeded.
+        Upload via Chromium using a persistent profile to preserve the session.
 
-        Strategy to defeat Google's headless-browser detection:
-        1. Use a persistent browser profile (cookies saved between runs).
-        2. On first run, inject the existing OAuth access_token as a Google
-           auth cookie so no UI sign-in is needed at all.
-        3. If the profile is already logged in, go straight to Studio.
+        On first run the browser signs in with YOUTUBE_EMAIL / YOUTUBE_PASSWORD
+        and the session is saved to data/browser_profile so subsequent runs
+        skip sign-in entirely.
         """
         try:
             from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
@@ -268,22 +266,18 @@ class YouTubeUploader:
 
         email = self.config.youtube_email
         password = self.config.youtube_password
+        if not email or not password:
+            logger.error("YOUTUBE_EMAIL / YOUTUBE_PASSWORD not set in .env — cannot do browser upload")
+            return None
+
         profile_dir = str(self.config.data_dir / "browser_profile")
+        logger.info("Browser upload starting…")
 
-        logger.info("Browser upload fallback starting…")
-
-        # Try to get an OAuth access token to inject as a cookie — this helps
-        # bypass Google's headless-browser detection. Skip entirely if API
-        # credentials aren't configured (placeholder values), since attempting
-        # the OAuth flow would open a browser / crash in headless environments.
+        # Skip OAuth token injection when API creds are placeholder values —
+        # attempting the OAuth flow in headless mode would fail or open a browser.
         access_token: str | None = None
-        client_id = getattr(self.config, "google_client_id", "")
-        creds_configured = (
-            client_id
-            and "your_client_id_here" not in client_id
-            and ".apps.googleusercontent.com" in client_id
-        )
-        if creds_configured:
+        _client_id = getattr(self.config, "google_client_id", "")
+        if _client_id and "your_client_id_here" not in _client_id and ".apps.googleusercontent.com" in _client_id:
             try:
                 creds = self._get_credentials()
                 if creds and creds.token:
@@ -291,17 +285,20 @@ class YouTubeUploader:
             except Exception:
                 pass
         else:
-            logger.info("  OAuth credentials not configured — skipping token injection, will use email/password sign-in")
+            logger.info("  API creds not set — will sign in via email/password")
 
         with sync_playwright() as pw:
             ctx = pw.chromium.launch_persistent_context(
                 profile_dir,
                 headless=True,
+                ignore_https_errors=True,
                 args=[
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
                     "--disable-blink-features=AutomationControlled",
+                    "--disable-features=IsolateOrigins,site-per-process",
                     "--disable-web-security",
+                    "--window-size=1280,800",
                 ],
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -309,116 +306,171 @@ class YouTubeUploader:
                     "Chrome/124.0.0.0 Safari/537.36"
                 ),
                 viewport={"width": 1280, "height": 800},
+                locale="en-US",
             )
             page = ctx.new_page()
+            # Hide the webdriver flag so Google's bot detection doesn't fire
+            page.add_init_script(
+                "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
+            )
 
             def _ss(tag: str) -> None:
                 try:
                     page.screenshot(path=f"/tmp/yt_upload_{tag}.png")
+                    logger.debug(f"  Screenshot: /tmp/yt_upload_{tag}.png")
                 except Exception:
                     pass
 
             def _needs_signin() -> bool:
-                return "accounts.google.com" in page.url or "signin" in page.url.lower()
+                u = page.url
+                return (
+                    "accounts.google.com" in u
+                    or "signin" in u.lower()
+                    or "ServiceLogin" in u
+                )
 
             try:
-                # ── Inject OAuth token as a cookie to skip Google's sign-in ──
+                # ── Inject OAuth cookie to skip sign-in (best effort) ──────────
                 if access_token:
-                    logger.info("  Injecting OAuth token as auth cookie…")
-                    ctx.add_cookies([{
-                        "name": "oauth_token",
-                        "value": access_token,
-                        "domain": ".youtube.com",
-                        "path": "/",
-                        "secure": True,
-                        "httpOnly": False,
-                    }, {
-                        "name": "SAPISID",
-                        "value": access_token[:40],
-                        "domain": ".youtube.com",
-                        "path": "/",
-                        "secure": True,
-                        "httpOnly": False,
-                    }])
+                    logger.info("  Injecting OAuth token cookie…")
+                    ctx.add_cookies([
+                        {"name": "oauth_token", "value": access_token,
+                         "domain": ".youtube.com", "path": "/", "secure": True},
+                        {"name": "SAPISID", "value": access_token[:40],
+                         "domain": ".youtube.com", "path": "/", "secure": True},
+                    ])
 
-                # ── Navigate to YouTube Studio ─────────────────────────────────
+                # ── Go to Studio ───────────────────────────────────────────────
                 page.goto("https://studio.youtube.com",
                           wait_until="domcontentloaded", timeout=30_000)
-                _ss("studio_nav")
+                page.wait_for_timeout(2_000)
+                _ss("01_studio_nav")
+                logger.info(f"  After nav → {page.url[:80]}")
 
-                # ── UI sign-in if not already logged in ────────────────────────
-                if _needs_signin() and email and password:
+                # ── Sign in if redirected to Google login ──────────────────────
+                if _needs_signin():
                     logger.info(f"  Not logged in — signing in as {email}…")
                     if "accounts.google.com" not in page.url:
-                        page.goto("https://accounts.google.com/signin/v2/identifier?service=youtube",
-                                  wait_until="domcontentloaded", timeout=20_000)
+                        page.goto(
+                            "https://accounts.google.com/signin/v2/identifier"
+                            "?service=youtube&hl=en",
+                            wait_until="domcontentloaded", timeout=20_000,
+                        )
+                    _ss("02_signin_page")
 
-                    page.wait_for_selector('input[type="email"]', timeout=15_000)
-                    page.fill('input[type="email"]', email)
-                    page.keyboard.press("Enter")
-                    page.wait_for_timeout(1_500)
-                    page.wait_for_selector('input[type="password"]', timeout=15_000)
-                    page.fill('input[type="password"]', password)
-                    page.keyboard.press("Enter")
-                    page.wait_for_url("*youtube*", timeout=30_000)
+                    # Email field — Google uses #identifierId
+                    email_sel = '#identifierId, input[type="email"]'
+                    page.wait_for_selector(email_sel, timeout=15_000)
+                    page.fill(email_sel, email)
+                    _ss("03_email_filled")
+                    page.click('#identifierNext, button:has-text("Next")')
+                    page.wait_for_timeout(2_000)
+                    _ss("04_after_email_next")
+
+                    # Password field
+                    pwd_sel = 'input[type="password"]:visible'
+                    page.wait_for_selector(pwd_sel, timeout=15_000)
+                    page.fill(pwd_sel, password)
+                    _ss("05_pwd_filled")
+                    page.click('#passwordNext, button:has-text("Next"), button:has-text("Sign in")')
+
+                    # Wait for redirect out of accounts.google.com
+                    try:
+                        page.wait_for_url("*youtube*", timeout=30_000)
+                    except PWTimeout:
+                        _ss("06_signin_redirect_timeout")
+                        logger.error(
+                            f"  Sign-in redirect timed out — current URL: {page.url[:120]}\n"
+                            "  Possible causes: wrong password, 2FA, or Google challenge."
+                        )
+                        return None
+
                     logger.info("  ✓ Signed in — session saved to profile")
+                    _ss("07_post_signin")
                     page.goto("https://studio.youtube.com",
                               wait_until="domcontentloaded", timeout=30_000)
+                    page.wait_for_timeout(3_000)
+                    _ss("08_studio_after_signin")
 
                 if _needs_signin():
-                    logger.error("  Still on sign-in page after attempt — check credentials")
-                    _ss("signin_failed")
+                    logger.error(f"  Still on sign-in page: {page.url[:120]}")
+                    _ss("09_signin_failed")
                     return None
 
-                logger.info("  ✓ On YouTube Studio")
-                _ss("studio_ready")
+                logger.info(f"  ✓ On YouTube Studio: {page.url[:80]}")
+                _ss("10_studio_ready")
 
                 # ── Create → Upload videos ─────────────────────────────────────
-                page.wait_for_selector('ytcp-button#create-icon, button[aria-label="Create"]',
-                                       timeout=15_000)
-                page.click('ytcp-button#create-icon, button[aria-label="Create"]')
-                page.wait_for_timeout(600)
-                page.click('tp-yt-paper-item:has-text("Upload videos"), yt-formatted-string:has-text("Upload videos")',
-                           timeout=8_000)
+                create_sel = (
+                    'ytcp-button#create-icon, '
+                    'button[aria-label="Create"], '
+                    '#create-icon'
+                )
+                page.wait_for_selector(create_sel, timeout=20_000)
+                page.click(create_sel)
+                page.wait_for_timeout(800)
+                _ss("11_create_clicked")
 
-                # ── Drop the file ──────────────────────────────────────────────
-                with page.expect_file_chooser(timeout=15_000) as fc:
-                    page.click('#select-files-button, input[type="file"]', timeout=10_000)
-                fc.value.set_files(str(video_path))
-                logger.info(f"  File set: {video_path.name}")
-
-                # ── Details: title & description ───────────────────────────────
-                page.wait_for_selector('ytcp-uploads-details', timeout=60_000)
+                upload_sel = (
+                    'tp-yt-paper-item:has-text("Upload videos"), '
+                    'yt-formatted-string:has-text("Upload videos"), '
+                    'a:has-text("Upload videos")'
+                )
+                page.wait_for_selector(upload_sel, timeout=10_000)
+                page.click(upload_sel)
                 page.wait_for_timeout(1_000)
+                _ss("12_upload_dialog")
+
+                # ── Select the file ────────────────────────────────────────────
+                file_btn_sel = (
+                    '#select-files-button, '
+                    'button:has-text("SELECT FILES"), '
+                    'input[type="file"]'
+                )
+                with page.expect_file_chooser(timeout=15_000) as fc_info:
+                    page.click(file_btn_sel, timeout=10_000)
+                fc_info.value.set_files(str(video_path))
+                logger.info(f"  File selected: {video_path.name}")
+                _ss("13_file_selected")
+
+                # ── Details form ───────────────────────────────────────────────
+                page.wait_for_selector('ytcp-uploads-details', timeout=90_000)
+                page.wait_for_timeout(1_500)
+                _ss("14_details_form")
 
                 title_sel = '#title-textarea #textbox'
                 page.wait_for_selector(title_sel, timeout=15_000)
                 page.click(title_sel)
                 page.keyboard.press("Control+a")
-                page.keyboard.type(title, delay=20)
+                page.keyboard.type(title, delay=25)
 
                 desc_sel = '#description-textarea #textbox'
+                page.wait_for_selector(desc_sel, timeout=10_000)
                 page.click(desc_sel)
                 page.keyboard.type(description[:4900], delay=3)
-                _ss("details_filled")
+                _ss("15_details_filled")
 
-                # ── Walk through 3 wizard steps ────────────────────────────────
-                for _ in range(3):
+                # ── Walk wizard steps (Next × up to 3) ────────────────────────
+                for step in range(3):
                     next_btn = page.locator('ytcp-button#next-button')
                     if next_btn.is_visible():
                         next_btn.click()
-                    page.wait_for_timeout(1_200)
+                        logger.info(f"  Wizard step {step + 1} → Next")
+                    page.wait_for_timeout(1_500)
 
                 # ── Visibility → Public ────────────────────────────────────────
-                page.wait_for_selector('ytcp-video-visibility-select', timeout=15_000)
+                page.wait_for_selector('ytcp-video-visibility-select', timeout=20_000)
+                _ss("16_visibility_page")
                 page.click('tp-yt-paper-radio-button[name="PUBLIC"]')
-                page.wait_for_timeout(500)
-                _ss("visibility_set")
+                page.wait_for_timeout(700)
+                _ss("17_visibility_public")
 
                 # ── Publish ────────────────────────────────────────────────────
                 page.click('ytcp-button#done-button', timeout=10_000)
-                page.wait_for_timeout(6_000)
-                _ss("published")
+                logger.info("  Publish clicked — waiting for confirmation…")
+                page.wait_for_timeout(8_000)
+                _ss("18_published")
+                logger.info(f"  Post-publish URL: {page.url[:120]}")
 
                 # Extract video ID from URL or page source
                 m = re.search(r'/video/([A-Za-z0-9_-]{11})', page.url)
@@ -429,11 +481,20 @@ class YouTubeUploader:
                 return video_id
 
             except PWTimeout as e:
-                logger.error(f"Browser upload timed out at: {e}")
+                logger.error(
+                    f"Browser upload timed out: {e}\n"
+                    f"  Current URL: {page.url[:120]}\n"
+                    f"  Debug screenshots in /tmp/yt_upload_*.png"
+                )
                 _ss("timeout")
                 return None
             except Exception as e:
-                logger.error(f"Browser upload error: {e}", exc_info=True)
+                logger.error(
+                    f"Browser upload error: {e}\n"
+                    f"  Current URL: {page.url[:120]}\n"
+                    f"  Debug screenshots in /tmp/yt_upload_*.png",
+                    exc_info=True,
+                )
                 _ss("error")
                 return None
             finally:
