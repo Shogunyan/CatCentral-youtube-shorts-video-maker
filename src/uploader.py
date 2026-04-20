@@ -511,7 +511,7 @@ class YouTubeUploader:
                     try:
                         page.wait_for_selector(d_sel, timeout=8_000)
                         page.click(d_sel)
-                        page.keyboard.type(description[:4900], delay=3)
+                        page.keyboard.type(description[:4900], delay=1)
                         logger.info("  Description filled")
                         break
                     except PWTimeout:
@@ -519,34 +519,68 @@ class YouTubeUploader:
 
                 _ss("15_details_filled")
 
-                # ── Walk wizard (Next × up to 4 steps) ────────────────────────
-                for step in range(4):
+                # ── Walk wizard — stop as soon as visibility page appears ───────
+                # YouTube Studio has 3 Next steps (Details → Elements → Checks)
+                # before the Visibility page. Clicking a 4th time goes past it.
+                vis_sel = (
+                    'ytcp-video-visibility-select, '
+                    'ytcp-uploads-publish, '
+                    '#visibility-select'
+                )
+                for step in range(5):
+                    # Stop if we've already reached the visibility page
+                    if page.locator(vis_sel).count() > 0:
+                        logger.info(f"  Reached visibility page after {step} step(s)")
+                        break
                     try:
                         next_btn = page.locator('ytcp-button#next-button')
                         next_btn.wait_for(state='visible', timeout=3_000)
+                        # Skip disabled Next buttons (still processing)
+                        if next_btn.get_attribute('disabled') is not None:
+                            page.wait_for_timeout(1_000)
+                            continue
                         next_btn.click()
                         logger.info(f"  Wizard step {step + 1}: Next clicked")
-                        page.wait_for_timeout(1_500)
+                        page.wait_for_timeout(2_000)
                     except Exception:
-                        break  # no more Next buttons — we're on the last page
+                        break
+
+                _ss("16_after_wizard")
 
                 # ── Visibility → Public ────────────────────────────────────────
                 try:
-                    page.wait_for_selector('ytcp-video-visibility-select', timeout=20_000)
+                    page.wait_for_selector(vis_sel, timeout=15_000)
                     _ss("16_visibility_page")
                 except PWTimeout:
                     _ss("16_no_visibility_page")
-                    logger.error("  Visibility page never appeared — check /tmp/yt_upload_*.png")
+                    logger.error(
+                        f"  Visibility page never appeared — URL: {page.url[:120]}"
+                    )
                     return None
 
-                page.click('tp-yt-paper-radio-button[name="PUBLIC"]')
+                # Click the PUBLIC radio button (try two selector variants)
+                for pub_sel in [
+                    'tp-yt-paper-radio-button[name="PUBLIC"]',
+                    'ytcp-radio-button[value="PUBLIC"]',
+                    'paper-radio-button[name="PUBLIC"]',
+                ]:
+                    try:
+                        page.wait_for_selector(pub_sel, timeout=5_000)
+                        page.click(pub_sel)
+                        logger.info("  Visibility set to Public")
+                        break
+                    except PWTimeout:
+                        continue
                 page.wait_for_timeout(800)
                 _ss("17_public_set")
 
-                # ── Wait for Done button to be enabled ─────────────────────────
-                done_btn = page.locator('ytcp-button#done-button')
+                # ── Wait for Done/Publish button to be enabled ─────────────────
+                done_btn = page.locator(
+                    'ytcp-button#done-button, '
+                    'ytcp-button[id="done-button"]'
+                )
                 try:
-                    done_btn.wait_for(state='visible', timeout=30_000)
+                    done_btn.first.wait_for(state='visible', timeout=30_000)
                 except PWTimeout:
                     _ss("18_no_done_button")
                     logger.error("  Done/Publish button never appeared")
@@ -555,12 +589,12 @@ class YouTubeUploader:
                 # YouTube disables the button while the video is still processing.
                 # Poll for up to 60 s until it's clickable.
                 for _ in range(60):
-                    if done_btn.get_attribute('disabled') is None:
+                    if done_btn.first.get_attribute('disabled') is None:
                         break
                     logger.info("  Waiting for upload to finish processing…")
                     page.wait_for_timeout(1_000)
 
-                done_btn.click()
+                done_btn.first.click()
                 logger.info("  Publish clicked — waiting for confirmation…")
                 page.wait_for_timeout(8_000)
                 _ss("18_published")
