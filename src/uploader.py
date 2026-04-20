@@ -11,6 +11,7 @@ data/youtube_token.json.
 import json
 import logging
 import os
+import re
 import subprocess
 import webbrowser
 from pathlib import Path
@@ -198,6 +199,17 @@ class YouTubeUploader:
             chunksize=10 * 1024 * 1024,  # 10 MB chunks
         )
 
+        # Skip the API entirely when credentials are placeholder values
+        _client_id = getattr(self.config, "google_client_id", "")
+        _api_ready = (
+            _client_id
+            and "your_client_id_here" not in _client_id
+            and ".apps.googleusercontent.com" in _client_id
+        )
+        if not _api_ready:
+            logger.info("YouTube API credentials not configured — going straight to browser upload…")
+            return self._browser_upload(video_path, title, description)
+
         logger.info(f"Uploading: {title!r} ({video_path.name})")
         try:
             service = self._get_service()
@@ -260,15 +272,26 @@ class YouTubeUploader:
 
         logger.info("Browser upload fallback starting…")
 
-        # Get the OAuth access token from existing credentials so we can
-        # inject it — this avoids the UI sign-in that Google blocks in headless.
+        # Try to get an OAuth access token to inject as a cookie — this helps
+        # bypass Google's headless-browser detection. Skip entirely if API
+        # credentials aren't configured (placeholder values), since attempting
+        # the OAuth flow would open a browser / crash in headless environments.
         access_token: str | None = None
-        try:
-            creds = self._get_credentials()
-            if creds and creds.token:
-                access_token = creds.token
-        except Exception:
-            pass
+        client_id = getattr(self.config, "google_client_id", "")
+        creds_configured = (
+            client_id
+            and "your_client_id_here" not in client_id
+            and ".apps.googleusercontent.com" in client_id
+        )
+        if creds_configured:
+            try:
+                creds = self._get_credentials()
+                if creds and creds.token:
+                    access_token = creds.token
+            except Exception:
+                pass
+        else:
+            logger.info("  OAuth credentials not configured — skipping token injection, will use email/password sign-in")
 
         with sync_playwright() as pw:
             ctx = pw.chromium.launch_persistent_context(
