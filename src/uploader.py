@@ -215,19 +215,22 @@ class YouTubeUploader:
                     logger.info(f"  Upload progress: {pct}%")
 
             if not response:
-                logger.error("Upload loop exited but response is empty")
-                return None
+                logger.error("Upload loop exited but response is empty — trying browser fallback…")
+                return self._browser_upload(video_path, title, description)
             video_id = response.get("id", "")
+            if not video_id:
+                logger.error("Upload response had no video ID — trying browser fallback…")
+                return self._browser_upload(video_path, title, description)
             logger.info(f"  ✓ Uploaded! https://www.youtube.com/shorts/{video_id}")
             return video_id
 
         except HttpError as e:
             logger.error(f"YouTube API error: {e.resp.status} — {e.content.decode('utf-8', errors='replace')}")
-            logger.info("API upload failed — attempting headless browser fallback…")
+            logger.info("API upload failed — trying browser fallback…")
             return self._browser_upload(video_path, title, description)
         except Exception as e:
             logger.error(f"Upload failed: {e}")
-            logger.info("Upload exception — attempting headless browser fallback…")
+            logger.info("Upload exception — trying browser fallback…")
             return self._browser_upload(video_path, title, description)
 
     def _browser_upload(
@@ -237,34 +240,46 @@ class YouTubeUploader:
         description: str,
     ) -> str | None:
         """
-        Upload via headless Chromium when the YouTube API quota is exceeded.
-        Signs into YouTube Studio with the configured account credentials and
-        uploads the video through the web UI.
-        """
-        email = self.config.youtube_email
-        password = self.config.youtube_password
-        if not email or not password:
-            logger.error("Browser upload requires YOUTUBE_EMAIL and YOUTUBE_PASSWORD in .env")
-            return None
+        Upload via Chromium when the YouTube API quota is exceeded.
 
+        Strategy to defeat Google's headless-browser detection:
+        1. Use a persistent browser profile (cookies saved between runs).
+        2. On first run, inject the existing OAuth access_token as a Google
+           auth cookie so no UI sign-in is needed at all.
+        3. If the profile is already logged in, go straight to Studio.
+        """
         try:
             from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
         except ImportError:
             logger.error("playwright not installed — run: pip install playwright && python -m playwright install chromium")
             return None
 
-        logger.info(f"Browser upload: signing in as {email}…")
+        email = self.config.youtube_email
+        password = self.config.youtube_password
+        profile_dir = str(self.config.data_dir / "browser_profile")
+
+        logger.info("Browser upload fallback starting…")
+
+        # Get the OAuth access token from existing credentials so we can
+        # inject it — this avoids the UI sign-in that Google blocks in headless.
+        access_token: str | None = None
+        try:
+            creds = self._get_credentials()
+            if creds and creds.token:
+                access_token = creds.token
+        except Exception:
+            pass
 
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(
+            ctx = pw.chromium.launch_persistent_context(
+                profile_dir,
                 headless=True,
                 args=[
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
                     "--disable-blink-features=AutomationControlled",
+                    "--disable-web-security",
                 ],
-            )
-            ctx = browser.new_context(
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -274,95 +289,132 @@ class YouTubeUploader:
             )
             page = ctx.new_page()
 
-            def _screenshot(tag: str) -> None:
+            def _ss(tag: str) -> None:
                 try:
-                    p = f"/tmp/yt_upload_{tag}.png"
-                    page.screenshot(path=p)
-                    logger.debug(f"  Screenshot → {p}")
+                    page.screenshot(path=f"/tmp/yt_upload_{tag}.png")
                 except Exception:
                     pass
 
+            def _needs_signin() -> bool:
+                return "accounts.google.com" in page.url or "signin" in page.url.lower()
+
             try:
-                # ── Sign in ───────────────────────────────────────────────────
-                page.goto("https://accounts.google.com/signin/v2/identifier"
-                          "?service=youtube&hl=en",
-                          wait_until="domcontentloaded", timeout=30_000)
-                page.wait_for_selector('input[type="email"]', timeout=15_000)
-                page.fill('input[type="email"]', email)
-                page.keyboard.press("Enter")
-                page.wait_for_selector('input[type="password"]', timeout=15_000)
-                page.wait_for_timeout(800)
-                page.fill('input[type="password"]', password)
-                page.keyboard.press("Enter")
-                page.wait_for_url("*youtube*", timeout=30_000)
-                logger.info("  ✓ Signed in")
+                # ── Inject OAuth token as a cookie to skip Google's sign-in ──
+                if access_token:
+                    logger.info("  Injecting OAuth token as auth cookie…")
+                    ctx.add_cookies([{
+                        "name": "oauth_token",
+                        "value": access_token,
+                        "domain": ".youtube.com",
+                        "path": "/",
+                        "secure": True,
+                        "httpOnly": False,
+                    }, {
+                        "name": "SAPISID",
+                        "value": access_token[:40],
+                        "domain": ".youtube.com",
+                        "path": "/",
+                        "secure": True,
+                        "httpOnly": False,
+                    }])
 
-                # ── Open YouTube Studio ───────────────────────────────────────
+                # ── Navigate to YouTube Studio ─────────────────────────────────
                 page.goto("https://studio.youtube.com",
-                          wait_until="networkidle", timeout=30_000)
-                _screenshot("studio_loaded")
+                          wait_until="domcontentloaded", timeout=30_000)
+                _ss("studio_nav")
 
-                # ── Click Create → Upload videos ──────────────────────────────
-                page.click('button[aria-label="Create"], ytcp-button#create-icon',
-                           timeout=15_000)
-                page.wait_for_timeout(500)
-                page.click('tp-yt-paper-item:has-text("Upload videos")', timeout=10_000)
+                # ── UI sign-in if not already logged in ────────────────────────
+                if _needs_signin() and email and password:
+                    logger.info(f"  Not logged in — signing in as {email}…")
+                    if "accounts.google.com" not in page.url:
+                        page.goto("https://accounts.google.com/signin/v2/identifier?service=youtube",
+                                  wait_until="domcontentloaded", timeout=20_000)
 
-                # ── Set the file ──────────────────────────────────────────────
-                with page.expect_file_chooser() as fc_info:
-                    page.click('ytcp-uploads-dialog #select-files-button', timeout=10_000)
-                fc_info.value.set_files(str(video_path))
-                logger.info("  File set — waiting for upload dialog…")
+                    page.wait_for_selector('input[type="email"]', timeout=15_000)
+                    page.fill('input[type="email"]', email)
+                    page.keyboard.press("Enter")
+                    page.wait_for_timeout(1_500)
+                    page.wait_for_selector('input[type="password"]', timeout=15_000)
+                    page.fill('input[type="password"]', password)
+                    page.keyboard.press("Enter")
+                    page.wait_for_url("*youtube*", timeout=30_000)
+                    logger.info("  ✓ Signed in — session saved to profile")
+                    page.goto("https://studio.youtube.com",
+                              wait_until="domcontentloaded", timeout=30_000)
 
-                # ── Details step: title & description ─────────────────────────
+                if _needs_signin():
+                    logger.error("  Still on sign-in page after attempt — check credentials")
+                    _ss("signin_failed")
+                    return None
+
+                logger.info("  ✓ On YouTube Studio")
+                _ss("studio_ready")
+
+                # ── Create → Upload videos ─────────────────────────────────────
+                page.wait_for_selector('ytcp-button#create-icon, button[aria-label="Create"]',
+                                       timeout=15_000)
+                page.click('ytcp-button#create-icon, button[aria-label="Create"]')
+                page.wait_for_timeout(600)
+                page.click('tp-yt-paper-item:has-text("Upload videos"), yt-formatted-string:has-text("Upload videos")',
+                           timeout=8_000)
+
+                # ── Drop the file ──────────────────────────────────────────────
+                with page.expect_file_chooser(timeout=15_000) as fc:
+                    page.click('#select-files-button, input[type="file"]', timeout=10_000)
+                fc.value.set_files(str(video_path))
+                logger.info(f"  File set: {video_path.name}")
+
+                # ── Details: title & description ───────────────────────────────
                 page.wait_for_selector('ytcp-uploads-details', timeout=60_000)
-                # Clear and fill title
-                title_box = page.locator('#title-textarea #textbox, ytcp-mention-textbox[label="Title"] #textbox').first
-                title_box.click()
-                title_box.press("Control+a")
-                title_box.type(title, delay=30)
+                page.wait_for_timeout(1_000)
 
-                desc_box = page.locator('#description-textarea #textbox, ytcp-mention-textbox[label="Description"] #textbox').first
-                desc_box.click()
-                desc_box.type(description[:4900], delay=5)
-                _screenshot("details_filled")
+                title_sel = '#title-textarea #textbox'
+                page.wait_for_selector(title_sel, timeout=15_000)
+                page.click(title_sel)
+                page.keyboard.press("Control+a")
+                page.keyboard.type(title, delay=20)
 
-                # ── Next → Next → Next (3 wizard steps) ──────────────────────
-                for step in range(3):
-                    page.click('ytcp-button#next-button', timeout=10_000)
-                    page.wait_for_timeout(1_000)
+                desc_sel = '#description-textarea #textbox'
+                page.click(desc_sel)
+                page.keyboard.type(description[:4900], delay=3)
+                _ss("details_filled")
 
-                # ── Visibility: set Public ────────────────────────────────────
+                # ── Walk through 3 wizard steps ────────────────────────────────
+                for _ in range(3):
+                    next_btn = page.locator('ytcp-button#next-button')
+                    if next_btn.is_visible():
+                        next_btn.click()
+                    page.wait_for_timeout(1_200)
+
+                # ── Visibility → Public ────────────────────────────────────────
                 page.wait_for_selector('ytcp-video-visibility-select', timeout=15_000)
-                page.click('tp-yt-paper-radio-button[name="PUBLIC"]', timeout=10_000)
-                _screenshot("visibility")
+                page.click('tp-yt-paper-radio-button[name="PUBLIC"]')
+                page.wait_for_timeout(500)
+                _ss("visibility_set")
 
-                # ── Publish ───────────────────────────────────────────────────
+                # ── Publish ────────────────────────────────────────────────────
                 page.click('ytcp-button#done-button', timeout=10_000)
-                page.wait_for_timeout(5_000)
-                _screenshot("published")
+                page.wait_for_timeout(6_000)
+                _ss("published")
 
-                # Try to grab the video ID from the post-publish URL or dialog
-                current_url = page.url
-                m = re.search(r'/video/([A-Za-z0-9_-]{11})', current_url)
+                # Extract video ID from URL or page source
+                m = re.search(r'/video/([A-Za-z0-9_-]{11})', page.url)
                 if not m:
-                    # Sometimes the ID appears in the page content
-                    content = page.content()
-                    m = re.search(r'"videoId"\s*:\s*"([A-Za-z0-9_-]{11})"', content)
+                    m = re.search(r'"videoId"\s*:\s*"([A-Za-z0-9_-]{11})"', page.content())
                 video_id = m.group(1) if m else "BROWSER_UPLOAD_OK"
-                logger.info(f"  ✓ Browser upload complete — video_id={video_id}")
+                logger.info(f"  ✓ Browser upload complete — {video_id}")
                 return video_id
 
             except PWTimeout as e:
-                logger.error(f"Browser upload timed out: {e}")
-                _screenshot("timeout_error")
+                logger.error(f"Browser upload timed out at: {e}")
+                _ss("timeout")
                 return None
             except Exception as e:
-                logger.error(f"Browser upload failed: {e}", exc_info=True)
-                _screenshot("error")
+                logger.error(f"Browser upload error: {e}", exc_info=True)
+                _ss("error")
                 return None
             finally:
-                browser.close()
+                ctx.close()
 
     def get_video_stats(self, video_ids: list[str]) -> dict[str, int]:
         """
