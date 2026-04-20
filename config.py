@@ -22,6 +22,10 @@ class Config:
         self.google_client_id: str = os.getenv("GOOGLE_CLIENT_ID", "")
         self.google_client_secret: str = os.getenv("GOOGLE_CLIENT_SECRET", "")
 
+        # ── YouTube account credentials (headless browser upload fallback) ──
+        self.youtube_email: str = os.getenv("YOUTUBE_EMAIL", "")
+        self.youtube_password: str = os.getenv("YOUTUBE_PASSWORD", "")
+
         # ── Instagram (optional — scraper pending Gemini integration) ──
         self.instagram_username: str = os.getenv("INSTAGRAM_USERNAME", "")
         self.instagram_password: str = os.getenv("INSTAGRAM_PASSWORD", "")

@@ -57,6 +57,19 @@ CAT_SHORTS_HASHTAGS = [
     "https://www.youtube.com/hashtag/catmoments",
 ]
 
+# Channel Shorts tabs — verified channels that post cat ranking Shorts.
+# YouTube channel Shorts tabs ONLY serve Shorts (guaranteed portrait).
+CAT_RANKING_CHANNELS = [
+    "https://www.youtube.com/channel/UCa4XAcFhmLBRfVFkpHPNOkQ/shorts",  # SpiderCat Ranks
+    "https://www.youtube.com/channel/UCE5bDWECttfF4KREfJPXIHg/shorts",  # percycat
+    "https://www.youtube.com/channel/UC_fePuMdioL0F4ElvTigOSg/shorts",  # RankingGuy
+    "https://www.youtube.com/channel/UCX29GSKREkS1aPT2n7KuQ-g/shorts",  # KuyaClipz
+    "https://www.youtube.com/channel/UCwvoBUlbOkU12U7NuN_sPLw/shorts",  # Cute Cats
+    "https://www.youtube.com/channel/UCNuGGWYjgk9cU9RrQs8n4mQ/shorts",  # Humor Swamp
+    "https://www.youtube.com/channel/UCxAWpXC0PO4XZ5IjGB_5RLg/shorts",  # Buzzing 5
+    "https://www.youtube.com/channel/UC6ISS4Cj_AGSai8rhEpbBrA/shorts",  # Shortlive
+]
+
 # Last-resort ytsearch queries — only used with strict ≤60s duration filter
 CAT_RANKING_QUERIES = [
     "top 5 funniest cat moments",
@@ -330,12 +343,11 @@ class VideoScraper:
         """
         Search for cat ranking Shorts.
 
-        Phase 1 — ranking-specific hashtag pages: YouTube ONLY serves Shorts on
-        hashtag pages, so every result here is guaranteed portrait.
-        Phase 2 — general cat Shorts hashtag pages with ranking title filter:
-        still 100% Shorts, broader pool.
-        Phase 3 — ytsearch50 as absolute last resort, but capped at 60s duration
-        to dramatically reduce landscape videos slipping through.
+        Phase 1 — ranking hashtag pages (100% Shorts, ranking filter)
+        Phase 2 — general cat Shorts hashtag pages (100% Shorts, ranking filter)
+        Phase 3 — known channel Shorts tabs (100% Shorts, ranking filter)
+        Phase 4 — YouTube Shorts-type search (sp=EgIYAQ, ranking filter, ≤180s)
+        Phase 5 — ytsearch50 last resort, capped at 60s (ranking filter)
         """
         seen: set[str] = set()
         found: list[dict] = []
@@ -392,9 +404,39 @@ class VideoScraper:
                 tag = ht_url.split("/")[-1]
                 logger.info(f"  #Shorts hashtag #{tag} → {len(entries or [])} results, {len(found)-before} added (ranking filter)")
 
-        # ── Phase 3: ytsearch last resort — strict 60s cap to avoid landscape ──
+        # ── Phase 3: known channel Shorts tabs (100% Shorts, ranking filter) ────
+        if len(found) < RANKING_ANALYSE_LIMIT:
+            for ch_url in random.sample(CAT_RANKING_CHANNELS, len(CAT_RANKING_CHANNELS)):
+                if len(found) >= RANKING_ANALYSE_LIMIT:
+                    break
+                entries = self._ydl_extract_flat(ch_url, playlist_end=30)
+                before = len(found)
+                for e in (entries or []):
+                    _accept(e, require_ranking=True, max_dur=180)
+                ch_name = ch_url.split("/channel/")[1].split("/")[0][:12]
+                logger.info(f"  Channel {ch_name}/shorts → {len(entries or [])} results, {len(found)-before} added")
+
+        # ── Phase 4: YouTube Shorts-type search (sp=EgIYAQ — Shorts type filter) ─
         if len(found) < RANKING_ANALYSE_LIMIT // 2:
-            logger.info("  Hashtags insufficient — falling back to ytsearch (≤60s only)…")
+            logger.info("  Channel tabs insufficient — trying YouTube Shorts search (sp=EgIYAQ)…")
+            for q in random.sample(CAT_RANKING_QUERIES, len(CAT_RANKING_QUERIES)):
+                if len(found) >= RANKING_ANALYSE_LIMIT:
+                    break
+                try:
+                    q_enc = urllib.parse.quote_plus(q)
+                    url = f"https://www.youtube.com/results?search_query={q_enc}&sp=EgIYAQ%3D%3D"
+                    entries = self._ydl_extract_flat(url, playlist_end=50)
+                except Exception as ex:
+                    logger.debug(f"Shorts search failed '{q}': {ex}")
+                    continue
+                before = len(found)
+                for e in (entries or []):
+                    _accept(e, require_ranking=True, max_dur=180)
+                logger.info(f"  sp=EgIYAQ '{q[:35]}' → {len(entries or [])} results, {len(found)-before} added")
+
+        # ── Phase 5: ytsearch last resort — strict 60s cap to avoid landscape ──
+        if len(found) < RANKING_ANALYSE_LIMIT // 2:
+            logger.info("  Falling back to ytsearch (≤60s only)…")
             for q in random.sample(CAT_RANKING_QUERIES, len(CAT_RANKING_QUERIES)):
                 if len(found) >= RANKING_ANALYSE_LIMIT:
                     break

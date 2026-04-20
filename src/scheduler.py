@@ -26,7 +26,7 @@ from typing import Callable
 import schedule
 
 from config import Config
-from src.caption_gen import generate_caption
+from src.caption_gen import generate_caption, generate_caption_from_source
 from src.downloader import Downloader
 from src.scraper import VideoScraper
 from src.uploader import YouTubeUploader
@@ -81,13 +81,8 @@ class Pipeline:
             self._report(2, "♻️  Clip counters reset",
                          f"♻️  {reset_count} clip(s) recycled back into the pool (>14 days old)")
 
-        # ── 1. Pick theme + scrape matching clips ─────────────────────────────
-        self._report(3, "✏  Picking video theme…", "Generating title and description")
-        caption = generate_caption(n)
-        title = caption["title"]
-        self._report(4, "✏  Theme picked", f"Title: {title}")
-
-        self._report(5, "🔍  Scraping viral cat videos…",
+        # ── 1. Scrape — title is generated AFTER download so it can match source ─
+        self._report(3, "🔍  Scraping viral cat videos…",
                      "Searching for 50K+ view cat ranking Shorts to clone…")
         candidates = self.scraper.get_candidates(want=n * 5)
         if not candidates:
@@ -110,6 +105,12 @@ class Pipeline:
                 return False
             kb = source_path.stat().st_size // 1024
             self._report(44, "⬇  Downloaded", f"✓ Source Short downloaded ({kb} KB)")
+
+            # ── Generate title NOW — after download — so it mirrors the source ──
+            source_title = full_item.get("title", "")
+            caption = generate_caption_from_source(source_title, n)
+            title = caption["title"]
+            self._report(45, "✏  Title generated", f"Title: {title}")
 
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             output_path = self.config.processed_dir / f"ranking_{ts}_{run_id}.mp4"

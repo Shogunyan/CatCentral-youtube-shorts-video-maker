@@ -223,10 +223,146 @@ class YouTubeUploader:
 
         except HttpError as e:
             logger.error(f"YouTube API error: {e.resp.status} — {e.content.decode('utf-8', errors='replace')}")
-            return None
+            logger.info("API upload failed — attempting headless browser fallback…")
+            return self._browser_upload(video_path, title, description)
         except Exception as e:
             logger.error(f"Upload failed: {e}")
+            logger.info("Upload exception — attempting headless browser fallback…")
+            return self._browser_upload(video_path, title, description)
+
+    def _browser_upload(
+        self,
+        video_path: Path,
+        title: str,
+        description: str,
+    ) -> str | None:
+        """
+        Upload via headless Chromium when the YouTube API quota is exceeded.
+        Signs into YouTube Studio with the configured account credentials and
+        uploads the video through the web UI.
+        """
+        email = self.config.youtube_email
+        password = self.config.youtube_password
+        if not email or not password:
+            logger.error("Browser upload requires YOUTUBE_EMAIL and YOUTUBE_PASSWORD in .env")
             return None
+
+        try:
+            from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+        except ImportError:
+            logger.error("playwright not installed — run: pip install playwright && python -m playwright install chromium")
+            return None
+
+        logger.info(f"Browser upload: signing in as {email}…")
+
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled",
+                ],
+            )
+            ctx = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1280, "height": 800},
+            )
+            page = ctx.new_page()
+
+            def _screenshot(tag: str) -> None:
+                try:
+                    p = f"/tmp/yt_upload_{tag}.png"
+                    page.screenshot(path=p)
+                    logger.debug(f"  Screenshot → {p}")
+                except Exception:
+                    pass
+
+            try:
+                # ── Sign in ───────────────────────────────────────────────────
+                page.goto("https://accounts.google.com/signin/v2/identifier"
+                          "?service=youtube&hl=en",
+                          wait_until="domcontentloaded", timeout=30_000)
+                page.wait_for_selector('input[type="email"]', timeout=15_000)
+                page.fill('input[type="email"]', email)
+                page.keyboard.press("Enter")
+                page.wait_for_selector('input[type="password"]', timeout=15_000)
+                page.wait_for_timeout(800)
+                page.fill('input[type="password"]', password)
+                page.keyboard.press("Enter")
+                page.wait_for_url("*youtube*", timeout=30_000)
+                logger.info("  ✓ Signed in")
+
+                # ── Open YouTube Studio ───────────────────────────────────────
+                page.goto("https://studio.youtube.com",
+                          wait_until="networkidle", timeout=30_000)
+                _screenshot("studio_loaded")
+
+                # ── Click Create → Upload videos ──────────────────────────────
+                page.click('button[aria-label="Create"], ytcp-button#create-icon',
+                           timeout=15_000)
+                page.wait_for_timeout(500)
+                page.click('tp-yt-paper-item:has-text("Upload videos")', timeout=10_000)
+
+                # ── Set the file ──────────────────────────────────────────────
+                with page.expect_file_chooser() as fc_info:
+                    page.click('ytcp-uploads-dialog #select-files-button', timeout=10_000)
+                fc_info.value.set_files(str(video_path))
+                logger.info("  File set — waiting for upload dialog…")
+
+                # ── Details step: title & description ─────────────────────────
+                page.wait_for_selector('ytcp-uploads-details', timeout=60_000)
+                # Clear and fill title
+                title_box = page.locator('#title-textarea #textbox, ytcp-mention-textbox[label="Title"] #textbox').first
+                title_box.click()
+                title_box.press("Control+a")
+                title_box.type(title, delay=30)
+
+                desc_box = page.locator('#description-textarea #textbox, ytcp-mention-textbox[label="Description"] #textbox').first
+                desc_box.click()
+                desc_box.type(description[:4900], delay=5)
+                _screenshot("details_filled")
+
+                # ── Next → Next → Next (3 wizard steps) ──────────────────────
+                for step in range(3):
+                    page.click('ytcp-button#next-button', timeout=10_000)
+                    page.wait_for_timeout(1_000)
+
+                # ── Visibility: set Public ────────────────────────────────────
+                page.wait_for_selector('ytcp-video-visibility-select', timeout=15_000)
+                page.click('tp-yt-paper-radio-button[name="PUBLIC"]', timeout=10_000)
+                _screenshot("visibility")
+
+                # ── Publish ───────────────────────────────────────────────────
+                page.click('ytcp-button#done-button', timeout=10_000)
+                page.wait_for_timeout(5_000)
+                _screenshot("published")
+
+                # Try to grab the video ID from the post-publish URL or dialog
+                current_url = page.url
+                m = re.search(r'/video/([A-Za-z0-9_-]{11})', current_url)
+                if not m:
+                    # Sometimes the ID appears in the page content
+                    content = page.content()
+                    m = re.search(r'"videoId"\s*:\s*"([A-Za-z0-9_-]{11})"', content)
+                video_id = m.group(1) if m else "BROWSER_UPLOAD_OK"
+                logger.info(f"  ✓ Browser upload complete — video_id={video_id}")
+                return video_id
+
+            except PWTimeout as e:
+                logger.error(f"Browser upload timed out: {e}")
+                _screenshot("timeout_error")
+                return None
+            except Exception as e:
+                logger.error(f"Browser upload failed: {e}", exc_info=True)
+                _screenshot("error")
+                return None
+            finally:
+                browser.close()
 
     def get_video_stats(self, video_ids: list[str]) -> dict[str, int]:
         """

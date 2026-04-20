@@ -2,6 +2,7 @@
 caption_gen.py — Generates YouTube titles, descriptions, and tag lists.
 """
 import random
+import re
 
 # ── Title themes ─────────────────────────────────────────────────────────────
 
@@ -244,4 +245,104 @@ def generate_caption(n: int = 5) -> dict:
             theme["title"], extra_hashtags=theme["tt_hashtags"]
         ),
         "tags": generate_tags(theme["tt_hashtags"]),
+    }
+
+
+# ── Source-title-aware caption generation ─────────────────────────────────────
+
+_TOP_N_RE = re.compile(r'\btop\s*(\d+)\b', re.IGNORECASE)
+_N_TO_1_RE = re.compile(r'\b(\d+)\s*to\s*1\b', re.IGNORECASE)
+
+# (substring-to-detect, clean descriptor we output)
+_DESCRIPTORS = [
+    ("funniest", "Funniest"),
+    ("hilarious", "Funniest"),
+    ("funny", "Funniest"),
+    ("cutest", "Cutest"),
+    ("cute", "Cutest"),
+    ("adorable", "Cutest"),
+    ("wildest", "Wildest"),
+    ("wild", "Wildest"),
+    ("chaotic", "Wildest"),
+    ("silly", "Funniest"),
+    ("goofy", "Funniest"),
+    ("craziest", "Craziest"),
+    ("crazy", "Craziest"),
+    ("best", "Best"),
+    ("viral", "Most Viral"),
+    ("unhinged", "Most Unhinged"),
+    ("random", "Most Random"),
+    ("angry", "Angriest"),
+    ("dumb", "Dumbest"),
+    ("dramatic", "Most Dramatic"),
+]
+
+_SUBJECTS = [
+    ("moment", "Cat Moments"),
+    ("clip", "Cat Clips"),
+    ("reaction", "Cat Reactions"),
+    ("fail", "Cat Fails"),
+    ("time", "Cat Moments"),
+    ("kitten", "Kitten Moments"),
+    ("breed", "Cat Breeds"),
+    ("sound", "Cat Sounds"),
+    ("video", "Cat Moments"),
+]
+
+_TITLE_EMOJIS = ["😂", "😹", "🏆", "🔥", "💀", "😱", "🐱", "😤"]
+
+
+def generate_caption_from_source(source_title: str, n: int = 5) -> dict:
+    """
+    Generate a caption whose title closely mirrors the source video's title.
+    This keeps the on-screen content and the title consistent (e.g. a
+    'Top 5 Funniest Cat Moments' source gets a matching title, not 'Cats
+    Are Built Different').
+    Falls back to generate_caption() if the source title can't be parsed.
+    """
+    t = source_title.lower()
+
+    # Extract ranking number
+    m = _TOP_N_RE.search(t)
+    if m:
+        ranking_n = int(m.group(1))
+    else:
+        m = _N_TO_1_RE.search(t)
+        ranking_n = int(m.group(1)) if m else n
+    ranking_n = min(max(ranking_n, 3), 10)
+
+    # Detect descriptor
+    descriptor = "Funniest"
+    for kw, desc in _DESCRIPTORS:
+        if kw in t:
+            descriptor = desc
+            break
+
+    # Detect subject
+    subject = "Cat Moments"
+    for kw, subj in _SUBJECTS:
+        if kw in t:
+            subject = subj
+            break
+
+    emoji = random.choice(_TITLE_EMOJIS)
+
+    if "ranked" in t or "ranking" in t or "to 1" in t:
+        title = f"{subject} Ranked {ranking_n} to 1 {emoji}"
+    else:
+        title = f"Top {ranking_n} {descriptor} {subject} {emoji}"
+
+    if len(title) > 85:
+        title = title[:82] + "..."
+
+    hashtags = ["top5cats", "catranking", "funnycats"]
+    if "kitten" in t:
+        hashtags = ["kitten", "kittenshorts", "funnycats"]
+    elif "cutest" in t or "cute" in t:
+        hashtags = ["cutecat", "catmoments", "funnycats"]
+
+    return {
+        "title": title,
+        "description": generate_description(title, extra_hashtags=hashtags),
+        "tags": generate_tags(hashtags),
     }

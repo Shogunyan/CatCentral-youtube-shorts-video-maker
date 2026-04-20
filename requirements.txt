@@ -19,3 +19,6 @@ colorama>=0.4.6
 easyocr>=1.7.0
 pillow>=10.0.0
 numpy>=1.24.0
+
+# Headless browser (YouTube Studio upload fallback when API quota exceeded)
+playwright>=1.40.0
