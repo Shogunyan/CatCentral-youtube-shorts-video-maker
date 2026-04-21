@@ -401,49 +401,43 @@ class YouTubeUploader:
                 _ss("10_studio_ready")
 
                 # ── Create → Upload videos ─────────────────────────────────────
-                create_sel = (
-                    'ytcp-button#create-icon, '
-                    'button[aria-label="Create"], '
-                    '#create-icon'
-                )
-                page.wait_for_selector(create_sel, timeout=20_000)
-                page.click(create_sel)
-                page.wait_for_timeout(1_200)
+                # Semantic selectors (get_by_role/label/text) pierce shadow DOM
+                # automatically and survive YouTube Studio UI changes.
+                logger.info("  Opening upload dialog…")
+                try:
+                    create = page.get_by_label('Create').first
+                    create.wait_for(state='visible', timeout=20_000)
+                    create.click()
+                except Exception:
+                    try:
+                        page.get_by_role('button', name=re.compile(r'^create$', re.I)).first.click()
+                    except Exception:
+                        page.locator('#create-icon, ytcp-button#create-icon').first.click()
+                page.wait_for_timeout(1_000)
                 _ss("11_create_clicked")
 
-                upload_sel = (
-                    'tp-yt-paper-item:has-text("Upload videos"), '
-                    'yt-formatted-string:has-text("Upload videos"), '
-                    'a:has-text("Upload videos")'
-                )
-                page.wait_for_selector(upload_sel, timeout=15_000)
-                page.click(upload_sel)
+                try:
+                    upload_item = page.get_by_text('Upload videos', exact=True).first
+                    upload_item.wait_for(state='visible', timeout=10_000)
+                    upload_item.click()
+                except Exception:
+                    page.locator(
+                        'tp-yt-paper-item:has-text("Upload videos"), '
+                        '[role="menuitem"]:has-text("Upload videos"), '
+                        'yt-formatted-string:has-text("Upload videos")'
+                    ).first.click()
                 page.wait_for_timeout(1_500)
                 _ss("11b_upload_clicked")
 
-                # ── Verify upload file-select dialog opened ────────────────────
-                dialog_ready_sel = (
-                    '#select-files-button, '
-                    'ytcp-file-upload, '
-                    'ytcp-upload-dialog, '
-                    '#upload-dialog'
-                )
-                try:
-                    page.wait_for_selector(dialog_ready_sel, timeout=15_000)
-                    logger.info("  Upload dialog open")
-                except PWTimeout:
-                    _ss("12_no_dialog")
-                    logger.error(
-                        f"  Upload file-select dialog never opened — "
-                        f"URL: {page.url[:120]}"
-                    )
-                    return None
-                _ss("12_upload_dialog")
-
-                # ── Select the file via file-chooser (triggers YouTube's upload) ─
+                # ── Select the file via file-chooser ──────────────────────────
                 try:
                     with page.expect_file_chooser(timeout=15_000) as fc:
-                        page.click('#select-files-button', timeout=10_000)
+                        try:
+                            page.get_by_role(
+                                'button', name=re.compile(r'select files', re.I)
+                            ).first.click(timeout=10_000)
+                        except Exception:
+                            page.locator('#select-files-button').first.click()
                     fc.value.set_files(str(video_path))
                     logger.info(f"  File set via chooser: {video_path.name}")
                 except Exception as chooser_err:
@@ -451,169 +445,221 @@ class YouTubeUploader:
                     page.locator('input[type="file"]').first.set_input_files(str(video_path))
                     logger.info(f"  File set via input: {video_path.name}")
                 _ss("13_file_set")
-                page.wait_for_timeout(3_000)
+                page.wait_for_timeout(2_000)
                 _ss("13b_processing")
 
-                # ── Wait for details panel (try each selector in order) ────────
+                # ── Wait for details panel — title field visible = panel ready ─
                 logger.info("  Waiting for upload details panel…")
-                DETAIL_SELS = [
-                    ('ytcp-uploads-details',         90_000),
-                    ('ytcp-video-metadata-editor',   20_000),
-                    ('#title-textarea',              20_000),
-                    ('ytcp-form-input-container',    20_000),
-                ]
                 details_appeared = False
-                for idx, (sel, tmo) in enumerate(DETAIL_SELS):
+                for label_text in ['Title (required)', 'Title', 'Add a title']:
                     try:
-                        page.wait_for_selector(sel, state='attached', timeout=tmo)
-                        logger.info(f"  Details panel found: {sel}")
+                        page.get_by_label(label_text, exact=False).first.wait_for(
+                            state='visible', timeout=90_000
+                        )
+                        logger.info(f"  Details panel ready (label: {label_text!r})")
                         details_appeared = True
                         break
                     except PWTimeout:
-                        _ss(f"14_try{idx}_timeout")
                         continue
 
                 if not details_appeared:
+                    for sel, tmo in [
+                        ('ytcp-uploads-details',       10_000),
+                        ('ytcp-video-metadata-editor', 10_000),
+                        ('#title-textarea',            10_000),
+                        ('ytcp-form-input-container',  10_000),
+                    ]:
+                        try:
+                            page.wait_for_selector(sel, state='attached', timeout=tmo)
+                            logger.info(f"  Details panel found (CSS): {sel}")
+                            details_appeared = True
+                            break
+                        except PWTimeout:
+                            continue
+
+                if not details_appeared:
                     _ss("14_details_never_appeared")
-                    logger.error(
-                        f"  Upload details panel never appeared — URL: {page.url[:120]}"
-                    )
+                    logger.error(f"  Upload details panel never appeared — URL: {page.url[:120]}")
                     return None
-                page.wait_for_timeout(2_000)
+
+                page.wait_for_timeout(1_500)
                 _ss("14_details_form")
 
                 # ── Fill title ─────────────────────────────────────────────────
                 title_filled = False
-                for t_sel in [
-                    '#title-textarea #textbox',
-                    '#title-textarea ytcp-ve #textbox',
-                    'ytcp-form-input-container[id="title-textarea"] #textbox',
-                ]:
+                for label_text in ['Title (required)', 'Title', 'Add a title']:
                     try:
-                        el = page.locator(t_sel).first
-                        el.wait_for(state='visible', timeout=8_000)
-                        # fill() sets text directly without typing char-by-char
-                        try:
-                            el.fill(title)
-                        except Exception:
-                            el.click()
-                            page.keyboard.press("Control+a")
-                            page.keyboard.type(title, delay=10)
-                        title_filled = True
+                        el = page.get_by_label(label_text, exact=False).first
+                        el.wait_for(state='visible', timeout=5_000)
+                        el.click()
+                        page.keyboard.press('Control+a')
+                        el.fill(title)
                         logger.info("  Title filled")
+                        title_filled = True
                         break
-                    except PWTimeout:
+                    except Exception:
                         continue
+
+                if not title_filled:
+                    for t_sel in [
+                        '#title-textarea #textbox',
+                        '#title-textarea ytcp-ve #textbox',
+                        'ytcp-form-input-container[id="title-textarea"] #textbox',
+                    ]:
+                        try:
+                            el = page.locator(t_sel).first
+                            el.wait_for(state='visible', timeout=5_000)
+                            el.fill(title)
+                            logger.info("  Title filled (CSS)")
+                            title_filled = True
+                            break
+                        except Exception:
+                            continue
+
                 if not title_filled:
                     logger.warning("  Title field not found — uploading without title change")
 
                 # ── Fill description ───────────────────────────────────────────
-                for d_sel in [
-                    '#description-textarea #textbox',
-                    '#description-textarea ytcp-ve #textbox',
-                    'ytcp-form-input-container[id="description-textarea"] #textbox',
-                ]:
+                for label_text in ['Description', 'Tell viewers about your video', 'Add a description']:
                     try:
-                        el = page.locator(d_sel).first
-                        el.wait_for(state='visible', timeout=8_000)
-                        try:
-                            el.fill(description[:4900])
-                        except Exception:
-                            el.click()
-                            page.keyboard.type(description[:500], delay=1)
+                        el = page.get_by_label(label_text, exact=False).first
+                        el.wait_for(state='visible', timeout=5_000)
+                        el.click()
+                        page.keyboard.press('Control+a')
+                        el.fill(description[:4900])
                         logger.info("  Description filled")
                         break
-                    except PWTimeout:
+                    except Exception:
                         continue
+                else:
+                    for d_sel in [
+                        '#description-textarea #textbox',
+                        '#description-textarea ytcp-ve #textbox',
+                        'ytcp-form-input-container[id="description-textarea"] #textbox',
+                    ]:
+                        try:
+                            el = page.locator(d_sel).first
+                            el.wait_for(state='visible', timeout=5_000)
+                            el.fill(description[:4900])
+                            logger.info("  Description filled (CSS)")
+                            break
+                        except Exception:
+                            continue
 
                 _ss("15_details_filled")
 
-                # ── Walk wizard — stop the moment visibility page appears ───────
-                # After each Next click we wait for EITHER another Next button
-                # OR the visibility page (up to 10 s). This handles pages that
-                # take a few seconds to transition.
-                vis_sel = (
-                    'ytcp-video-visibility-select, '
-                    'ytcp-uploads-publish, '
-                    '#visibility-select, '
-                    'tp-yt-paper-radio-button[name="PUBLIC"]'
-                )
-                combined_sel = f'ytcp-button#next-button, {vis_sel}'
-
+                # ── Walk the upload wizard ─────────────────────────────────────
+                # Stop as soon as the Visibility/Public radio button appears.
+                # get_by_role pierces shadow DOM, so 'Next' matches ytcp-button
+                # internal buttons without knowing the custom element structure.
+                logger.info("  Walking upload wizard…")
+                on_visibility = False
+                _pub_pat = re.compile(r'^public', re.I)
                 for step in range(6):
-                    # Already on visibility page?
-                    if page.locator(vis_sel).count() > 0:
-                        logger.info(f"  On visibility page after {step} step(s)")
+                    if page.get_by_role('radio', name=_pub_pat).count() > 0:
+                        logger.info(f"  Visibility page reached after {step} step(s)")
+                        on_visibility = True
                         break
 
-                    # Wait up to 10 s for either Next or visibility to appear
+                    next_btn = page.get_by_role('button', name='Next')
                     try:
-                        page.wait_for_selector(combined_sel, timeout=10_000)
+                        next_btn.first.wait_for(state='visible', timeout=10_000)
                     except PWTimeout:
-                        _ss(f"wizard_step{step}_stalled")
-                        logger.warning(f"  Step {step}: page not ready after 10s — stopping wizard")
+                        if page.get_by_role('radio', name=_pub_pat).count() > 0:
+                            on_visibility = True
+                        elif page.locator('ytcp-button#next-button').count() > 0:
+                            next_btn = page.locator('ytcp-button#next-button')
+                        else:
+                            _ss(f"wizard_step{step}_stalled")
+                            logger.warning(f"  Step {step}: Next not found after 10s — stopping")
+                            break
+
+                    if on_visibility:
                         break
 
-                    # Re-check after wait — visibility may have loaded
-                    if page.locator(vis_sel).count() > 0:
-                        logger.info(f"  On visibility page after {step} step(s)")
-                        break
-
-                    # Click Next
-                    next_btn = page.locator('ytcp-button#next-button').first
                     try:
-                        if next_btn.get_attribute('disabled') is not None:
+                        if next_btn.first.get_attribute('disabled') is not None:
                             page.wait_for_timeout(1_000)
                             continue
-                        next_btn.click()
+                        next_btn.first.click()
                         logger.info(f"  Wizard step {step + 1}: Next clicked")
+                        page.wait_for_timeout(800)
                     except Exception as ne:
                         logger.warning(f"  Step {step}: Next click failed ({ne}) — stopping")
                         break
 
                 _ss("16_after_wizard")
 
-                # ── Ensure we landed on the visibility page ────────────────────
-                try:
-                    page.wait_for_selector(vis_sel, timeout=15_000)
-                    _ss("16_visibility_page")
-                except PWTimeout:
-                    _ss("16_no_visibility_page")
-                    logger.error(f"  Visibility page never appeared — URL: {page.url[:120]}")
-                    return None
+                # ── Confirm / wait for visibility page ─────────────────────────
+                if not on_visibility:
+                    try:
+                        page.get_by_role('radio', name=_pub_pat).first.wait_for(
+                            state='visible', timeout=15_000
+                        )
+                        on_visibility = True
+                        _ss("16_visibility_page")
+                    except PWTimeout:
+                        vis_css = (
+                            'ytcp-video-visibility-select, ytcp-uploads-publish, '
+                            'tp-yt-paper-radio-button[name="PUBLIC"]'
+                        )
+                        try:
+                            page.wait_for_selector(vis_css, timeout=10_000)
+                            on_visibility = True
+                            _ss("16_visibility_css")
+                        except PWTimeout:
+                            _ss("16_no_visibility_page")
+                            logger.error(
+                                f"  Visibility page never appeared — URL: {page.url[:120]}"
+                            )
+                            return None
 
                 # ── Set visibility to Public ───────────────────────────────────
-                for pub_sel in [
-                    'tp-yt-paper-radio-button[name="PUBLIC"]',
-                    'ytcp-radio-button[value="PUBLIC"]',
-                    'paper-radio-button[name="PUBLIC"]',
-                ]:
-                    try:
-                        page.wait_for_selector(pub_sel, timeout=5_000)
-                        page.click(pub_sel)
-                        logger.info("  Visibility set to Public")
-                        break
-                    except PWTimeout:
-                        continue
+                pub_radio = page.get_by_role('radio', name=_pub_pat)
+                if pub_radio.count() > 0:
+                    pub_radio.first.click()
+                    logger.info("  Visibility set to Public (semantic)")
+                else:
+                    for pub_sel in [
+                        'tp-yt-paper-radio-button[name="PUBLIC"]',
+                        'ytcp-radio-button[value="PUBLIC"]',
+                        '[name="PUBLIC"]',
+                    ]:
+                        try:
+                            page.wait_for_selector(pub_sel, timeout=5_000)
+                            page.click(pub_sel)
+                            logger.info(f"  Visibility set to Public (CSS: {pub_sel})")
+                            break
+                        except PWTimeout:
+                            continue
+
                 page.wait_for_timeout(800)
                 _ss("17_public_set")
 
-                # ── Wait for Done/Publish button to be enabled ─────────────────
-                done_btn = page.locator(
-                    'ytcp-button#done-button, ytcp-button[id="done-button"]'
-                )
+                # ── Wait for Publish / Done / Save button ─────────────────────
+                # Button text varies: "Publish" (public), "Done" (private/unlisted),
+                # "Save" (scheduled). Match any of them semantically.
+                _save_pat = re.compile(r'\b(save|publish|done)\b', re.I)
+                done_btn = page.get_by_role('button', name=_save_pat)
                 try:
                     done_btn.first.wait_for(state='visible', timeout=30_000)
                 except PWTimeout:
-                    _ss("18_no_done_button")
-                    logger.error("  Done/Publish button never appeared")
-                    return None
+                    done_btn = page.locator(
+                        'ytcp-button#done-button, ytcp-button#publish-button, '
+                        'ytcp-button[id="done-button"]'
+                    )
+                    try:
+                        done_btn.first.wait_for(state='visible', timeout=10_000)
+                    except PWTimeout:
+                        _ss("18_no_done_button")
+                        logger.error("  Done/Publish button never appeared")
+                        return None
 
-                # YouTube keeps Done disabled while still processing — poll up to 60 s
-                for _ in range(60):
+                # YouTube keeps Done disabled while still transcoding — poll up to 2 min
+                for _ in range(120):
                     if done_btn.first.get_attribute('disabled') is None:
                         break
-                    logger.info("  Waiting for upload to finish processing…")
+                    logger.info("  Waiting for upload processing…")
                     page.wait_for_timeout(1_000)
 
                 done_btn.first.click()
