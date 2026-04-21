@@ -278,15 +278,39 @@ _DESCRIPTORS = [
 ]
 
 _SUBJECTS = [
-    ("moment", "Cat Moments"),
-    ("clip", "Cat Clips"),
+    # Appearance / body type — checked first so they win over generic terms
+    ("chunky",  "Chunky Cat Moments"),
+    ("chonky",  "Chonky Cat Moments"),
+    ("chubby",  "Chubby Cat Moments"),
+    ("round",   "Round Cat Moments"),
+    ("fluffy",  "Fluffy Cat Moments"),
+    ("floofy",  "Fluffy Cat Moments"),
+    ("giant",   "Giant Cat Moments"),
+    ("huge",    "Huge Cat Moments"),
+    ("big",     "Big Cat Moments"),
+    ("tiny",    "Tiny Cat Moments"),
+    ("small",   "Tiny Cat Moments"),
+    ("mini",    "Mini Cat Moments"),
+    ("fat",     "Fat Cat Moments"),
+    ("lazy",    "Lazy Cat Moments"),
+    ("sleepy",  "Sleepy Cat Moments"),
+    ("grumpy",  "Grumpy Cat Moments"),
+    ("derp",    "Derpy Cat Moments"),
+    ("angry",   "Angry Cat Moments"),
+    ("weird",   "Weird Cat Moments"),
+    ("silly",   "Silly Cat Moments"),
+    ("goofy",   "Goofy Cat Moments"),
+    ("zoomie",  "Cat Zoomie Moments"),
+    # Content type — specific first, generic last
+    ("kitten",   "Kitten Moments"),
+    ("breed",    "Cat Breeds"),
+    ("sound",    "Cat Sounds"),
     ("reaction", "Cat Reactions"),
-    ("fail", "Cat Fails"),
-    ("time", "Cat Moments"),
-    ("kitten", "Kitten Moments"),
-    ("breed", "Cat Breeds"),
-    ("sound", "Cat Sounds"),
-    ("video", "Cat Moments"),
+    ("fail",     "Cat Fails"),
+    ("clip",     "Cat Clips"),
+    ("moment",   "Cat Moments"),
+    ("time",     "Cat Moments"),
+    ("video",    "Cat Moments"),
 ]
 
 _TITLE_EMOJIS = ["😂", "😹", "🏆", "🔥", "💀", "😱", "🐱", "😤"]
