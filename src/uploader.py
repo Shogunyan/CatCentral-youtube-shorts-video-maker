@@ -483,23 +483,28 @@ class YouTubeUploader:
                 _ss("14_details_form")
 
                 # ── Fill title ─────────────────────────────────────────────────
-                title_typed = False
+                title_filled = False
                 for t_sel in [
                     '#title-textarea #textbox',
                     '#title-textarea ytcp-ve #textbox',
                     'ytcp-form-input-container[id="title-textarea"] #textbox',
                 ]:
                     try:
-                        page.wait_for_selector(t_sel, timeout=8_000)
-                        page.click(t_sel)
-                        page.keyboard.press("Control+a")
-                        page.keyboard.type(title, delay=25)
-                        title_typed = True
+                        el = page.locator(t_sel).first
+                        el.wait_for(state='visible', timeout=8_000)
+                        # fill() sets text directly without typing char-by-char
+                        try:
+                            el.fill(title)
+                        except Exception:
+                            el.click()
+                            page.keyboard.press("Control+a")
+                            page.keyboard.type(title, delay=10)
+                        title_filled = True
                         logger.info("  Title filled")
                         break
                     except PWTimeout:
                         continue
-                if not title_typed:
+                if not title_filled:
                     logger.warning("  Title field not found — uploading without title change")
 
                 # ── Fill description ───────────────────────────────────────────
@@ -509,9 +514,13 @@ class YouTubeUploader:
                     'ytcp-form-input-container[id="description-textarea"] #textbox',
                 ]:
                     try:
-                        page.wait_for_selector(d_sel, timeout=8_000)
-                        page.click(d_sel)
-                        page.keyboard.type(description[:4900], delay=1)
+                        el = page.locator(d_sel).first
+                        el.wait_for(state='visible', timeout=8_000)
+                        try:
+                            el.fill(description[:4900])
+                        except Exception:
+                            el.click()
+                            page.keyboard.type(description[:500], delay=1)
                         logger.info("  Description filled")
                         break
                     except PWTimeout:
@@ -519,46 +528,61 @@ class YouTubeUploader:
 
                 _ss("15_details_filled")
 
-                # ── Walk wizard — stop as soon as visibility page appears ───────
-                # YouTube Studio has 3 Next steps (Details → Elements → Checks)
-                # before the Visibility page. Clicking a 4th time goes past it.
+                # ── Walk wizard — stop the moment visibility page appears ───────
+                # After each Next click we wait for EITHER another Next button
+                # OR the visibility page (up to 10 s). This handles pages that
+                # take a few seconds to transition.
                 vis_sel = (
                     'ytcp-video-visibility-select, '
                     'ytcp-uploads-publish, '
-                    '#visibility-select'
+                    '#visibility-select, '
+                    'tp-yt-paper-radio-button[name="PUBLIC"]'
                 )
-                for step in range(5):
-                    # Stop if we've already reached the visibility page
+                combined_sel = f'ytcp-button#next-button, {vis_sel}'
+
+                for step in range(6):
+                    # Already on visibility page?
                     if page.locator(vis_sel).count() > 0:
-                        logger.info(f"  Reached visibility page after {step} step(s)")
+                        logger.info(f"  On visibility page after {step} step(s)")
                         break
+
+                    # Wait up to 10 s for either Next or visibility to appear
                     try:
-                        next_btn = page.locator('ytcp-button#next-button')
-                        next_btn.wait_for(state='visible', timeout=3_000)
-                        # Skip disabled Next buttons (still processing)
+                        page.wait_for_selector(combined_sel, timeout=10_000)
+                    except PWTimeout:
+                        _ss(f"wizard_step{step}_stalled")
+                        logger.warning(f"  Step {step}: page not ready after 10s — stopping wizard")
+                        break
+
+                    # Re-check after wait — visibility may have loaded
+                    if page.locator(vis_sel).count() > 0:
+                        logger.info(f"  On visibility page after {step} step(s)")
+                        break
+
+                    # Click Next
+                    next_btn = page.locator('ytcp-button#next-button').first
+                    try:
                         if next_btn.get_attribute('disabled') is not None:
                             page.wait_for_timeout(1_000)
                             continue
                         next_btn.click()
                         logger.info(f"  Wizard step {step + 1}: Next clicked")
-                        page.wait_for_timeout(2_000)
-                    except Exception:
+                    except Exception as ne:
+                        logger.warning(f"  Step {step}: Next click failed ({ne}) — stopping")
                         break
 
                 _ss("16_after_wizard")
 
-                # ── Visibility → Public ────────────────────────────────────────
+                # ── Ensure we landed on the visibility page ────────────────────
                 try:
                     page.wait_for_selector(vis_sel, timeout=15_000)
                     _ss("16_visibility_page")
                 except PWTimeout:
                     _ss("16_no_visibility_page")
-                    logger.error(
-                        f"  Visibility page never appeared — URL: {page.url[:120]}"
-                    )
+                    logger.error(f"  Visibility page never appeared — URL: {page.url[:120]}")
                     return None
 
-                # Click the PUBLIC radio button (try two selector variants)
+                # ── Set visibility to Public ───────────────────────────────────
                 for pub_sel in [
                     'tp-yt-paper-radio-button[name="PUBLIC"]',
                     'ytcp-radio-button[value="PUBLIC"]',
@@ -576,8 +600,7 @@ class YouTubeUploader:
 
                 # ── Wait for Done/Publish button to be enabled ─────────────────
                 done_btn = page.locator(
-                    'ytcp-button#done-button, '
-                    'ytcp-button[id="done-button"]'
+                    'ytcp-button#done-button, ytcp-button[id="done-button"]'
                 )
                 try:
                     done_btn.first.wait_for(state='visible', timeout=30_000)
@@ -586,8 +609,7 @@ class YouTubeUploader:
                     logger.error("  Done/Publish button never appeared")
                     return None
 
-                # YouTube disables the button while the video is still processing.
-                # Poll for up to 60 s until it's clickable.
+                # YouTube keeps Done disabled while still processing — poll up to 60 s
                 for _ in range(60):
                     if done_btn.first.get_attribute('disabled') is None:
                         break
