@@ -226,14 +226,23 @@ class Pipeline:
         if self.dry_run:
             uploaded_id = "DRY_RUN"
         else:
-            uploaded_id = self.uploader.upload(
-                video_path=output_path,
-                title=caption["title"],
-                description=caption["description"],
-                tags=caption["tags"],
-            )
+            uploaded_id = None
+            for attempt in range(1, 4):
+                uploaded_id = self.uploader.upload(
+                    video_path=output_path,
+                    title=caption["title"],
+                    description=caption["description"],
+                    tags=caption["tags"],
+                )
+                if uploaded_id:
+                    break
+                if attempt < 3:
+                    self._report(80, f"⏳  Upload attempt {attempt} failed — retrying…",
+                                 f"Upload attempt {attempt}/3 failed, retrying in 15s…")
+                    time.sleep(15)
             if not uploaded_id:
-                self._report(80, "❌  Upload failed", "YouTube upload returned no ID")
+                self._report(80, "❌  Upload failed after 3 attempts",
+                             "YouTube upload returned no ID after 3 tries")
                 return False
 
         self.copier.mark_used(video_id)
