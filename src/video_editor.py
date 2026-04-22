@@ -440,6 +440,56 @@ def create_full_short_ranking_video(
         raise RuntimeError("Branding step failed for full-short mode")
 
 
+def apply_watermark_only(
+    source_path: Path,
+    output_path: Path,
+    config,
+) -> None:
+    """
+    Minimal processing for channel-copy videos:
+      • Scale to 1080×1920 (letterbox if needed)
+      • Add moving @CatCentral watermark
+    No blur, no title bar — the source video is kept intact.
+    """
+    watermark_text = getattr(config, "watermark_text", "@CatCentral")
+    wm = _escape_drawtext(watermark_text)
+    pad = 55
+
+    x_expr = (
+        f"if(eq(mod(floor(t/12),4),0),{pad},"
+        f"if(eq(mod(floor(t/12),4),1),w-tw-{pad},"
+        f"if(eq(mod(floor(t/12),4),2),{pad},"
+        f"w-tw-{pad})))"
+    )
+    y_expr = (
+        f"if(eq(mod(floor(t/12),4),0),{pad+20},"
+        f"if(eq(mod(floor(t/12),4),1),{pad+20},"
+        f"if(eq(mod(floor(t/12),4),2),h-th-{pad},"
+        f"h-th-{pad})))"
+    )
+
+    scale_filter = (
+        "scale=1080:1920:force_original_aspect_ratio=decrease,"
+        "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black"
+    )
+    wm_filter = (
+        f"drawtext=text='{wm}'{_FONT_P}"
+        ":fontsize=34:fontcolor=white@0.75"
+        ":borderw=2:bordercolor=black@0.6"
+        f":x='{x_expr}':y='{y_expr}'"
+    )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    _ffmpeg(
+        "-i", str(source_path),
+        "-vf", f"{scale_filter},{wm_filter}",
+        "-c:v", VIDEO_CODEC, "-crf", VIDEO_CRF, "-preset", "fast",
+        "-c:a", "copy",
+        "-movflags", "+faststart",
+        str(output_path),
+    )
+
+
 # ── CLI helper ────────────────────────────────────────────────────────────────
 
 def check_ffmpeg():

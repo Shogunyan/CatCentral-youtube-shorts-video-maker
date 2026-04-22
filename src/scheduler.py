@@ -27,11 +27,20 @@ import schedule
 
 from config import Config
 from src.caption_gen import generate_caption, generate_caption_from_source
+from src.channel_copier import ChannelCopier
 from src.downloader import Downloader
 from src.scraper import VideoScraper
 from src.uploader import YouTubeUploader
 from src.video_editor import check_ffmpeg
 from src.video_tracker import VideoTracker
+
+# ── Channels to copy oldest→newest before falling back to the viral scraper ───
+# To add a channel: "Add https://www.youtube.com/@Name/shorts to copier"
+_COPY_CHANNELS = [
+    "https://www.youtube.com/@FilipponeTamela/shorts",
+    "https://www.youtube.com/@DailyDoseOfInternetCats/shorts",
+    "https://www.youtube.com/@Catsyycute/shorts",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +64,11 @@ class Pipeline:
         self.uploader = YouTubeUploader(config) if not dry_run else None
         self.tracker = VideoTracker(config)
 
+        # Seed channel copier with configured channels (no-ops if already added)
+        self.copier = ChannelCopier(config)
+        for ch_url in _COPY_CHANNELS:
+            self.copier.add_channel(ch_url)
+
     # ── Reporter helper ───────────────────────────────────────────────────────
 
     def _report(self, percent: float, action: str, log_msg: str = "") -> None:
@@ -74,6 +88,11 @@ class Pipeline:
 
         self._report(1, f"🚀  {dry}Starting pipeline…",
                      f"Pipeline run {run_id} starting")
+
+        # ── 0a. Channel-copy mode — highest priority ──────────────────────────
+        copy_item = self.copier.get_next_video()
+        if copy_item:
+            return self._run_channel_copy(copy_item, run_id)
 
         # ── 0. Housekeeping — reset expired clip counters ─────────────────────
         reset_count = self.scraper.reset_expired_clips()
@@ -163,6 +182,66 @@ class Pipeline:
             logger.info(f"Run {run_id} complete. video_id={video_id}")
             return True
 
+
+
+    def _run_channel_copy(self, copy_item: dict, run_id: str) -> bool:
+        """Download one video from a copy-channel, watermark it, and upload."""
+        handle = copy_item.get("_channel_handle", "unknown")
+        video_id = copy_item["id"]
+        dry = "[DRY RUN] " if self.dry_run else ""
+
+        self._report(5, f"📋  Copying from @{handle}…",
+                     f"{dry}Channel copy: @{handle} / {video_id}")
+
+        # Download
+        self._report(10, "⬇  Downloading video…", f"↓ {copy_item['url']}")
+        source_path = self.downloader.download(copy_item)
+        if not source_path:
+            self._report(10, "❌  Download failed", f"Could not download {video_id}")
+            return False
+        kb = source_path.stat().st_size // 1024
+        self._report(40, "⬇  Downloaded", f"✓ Downloaded ({kb} KB)")
+
+        # Generate caption from channel handle as the "source title"
+        caption = generate_caption_from_source(f"cat video from {handle}", 5)
+        title = caption["title"]
+        self._report(45, "✏  Title generated", f"Title: {title}")
+
+        # Apply watermark only (no blur, no title bar)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = self.config.processed_dir / f"copy_{ts}_{run_id}.mp4"
+        self._report(50, "🎬  Adding watermark…", "Applying CatCentral watermark…")
+        try:
+            if not self.dry_run:
+                from src.video_editor import apply_watermark_only
+                apply_watermark_only(source_path, output_path, self.config)
+            else:
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.touch()
+        except Exception as e:
+            self._report(50, "❌  Watermark failed", str(e))
+            logger.error(f"Watermark step failed: {e}", exc_info=True)
+            return False
+
+        self._report(80, "📤  Uploading…", "Starting upload…")
+        if self.dry_run:
+            uploaded_id = "DRY_RUN"
+        else:
+            uploaded_id = self.uploader.upload(
+                video_path=output_path,
+                title=caption["title"],
+                description=caption["description"],
+                tags=caption["tags"],
+            )
+            if not uploaded_id:
+                self._report(80, "❌  Upload failed", "YouTube upload returned no ID")
+                return False
+
+        self.copier.mark_used(video_id)
+        self._report(100, "✅  Done! Video is live.",
+                     f"Channel copy complete — {video_id}")
+        logger.info(f"Run {run_id} complete (channel copy). video_id={uploaded_id}")
+        return True
 
 
 # ── Headless scheduler (used by `python main.py schedule`) ───────────────────
