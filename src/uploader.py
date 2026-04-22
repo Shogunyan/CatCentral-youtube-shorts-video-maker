@@ -400,6 +400,22 @@ class YouTubeUploader:
                 logger.info(f"  ✓ On YouTube Studio: {page.url[:80]}")
                 _ss("10_studio_ready")
 
+                # ── Recover from Studio "Oops" dashboard error ─────────────────
+                # The dashboard content can fail to load while the Studio chrome
+                # (including the Create button) is still functional. A reload
+                # usually fixes it within a few seconds.
+                for _reload_attempt in range(3):
+                    if page.get_by_text("Oops, something went wrong", exact=False).count() > 0:
+                        logger.warning(
+                            f"  YouTube Studio dashboard error detected "
+                            f"(attempt {_reload_attempt + 1}/3) — reloading…"
+                        )
+                        _ss(f"10b_studio_error_{_reload_attempt}")
+                        page.reload(wait_until="domcontentloaded", timeout=30_000)
+                        page.wait_for_timeout(4_000)
+                    else:
+                        break
+
                 # ── Create → Upload videos ─────────────────────────────────────
                 # Semantic selectors (get_by_role/label/text) pierce shadow DOM
                 # automatically and survive YouTube Studio UI changes.
