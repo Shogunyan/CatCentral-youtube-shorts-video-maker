@@ -478,11 +478,30 @@ def apply_watermark_only(
         ":borderw=2:bordercolor=black@0.6"
         f":x='{x_expr}':y='{y_expr}'"
     )
+    popup_box = (
+        "drawbox=x=280:y=1710:w=520:h=88"
+        ":color=#EE1111@0.88:t=fill"
+        ":enable='between(t,3,6)'"
+    )
+    popup_text = (
+        f"drawtext=text='LIKE \\& SUBSCRIBE'{_FONT_B}"
+        ":fontsize=40:fontcolor=white"
+        ":borderw=3:bordercolor=black@0.8"
+        ":x=(w-tw)/2:y=1728"
+        ":enable='between(t,3,6)'"
+    )
+    popup_hint = (
+        f"drawtext=text='for more cat videos'{_FONT_P}"
+        ":fontsize=24:fontcolor=white@0.8"
+        ":borderw=2:bordercolor=black@0.6"
+        ":x=(w-tw)/2:y=1768"
+        ":enable='between(t,3,6)'"
+    )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     _ffmpeg(
         "-i", str(source_path),
-        "-vf", f"{scale_filter},{wm_filter}",
+        "-vf", f"{scale_filter},{wm_filter},{popup_box},{popup_text},{popup_hint}",
         "-c:v", VIDEO_CODEC, "-crf", VIDEO_CRF, "-preset", "fast",
         "-c:a", "copy",
         "-movflags", "+faststart",
