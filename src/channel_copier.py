@@ -93,9 +93,14 @@ class ChannelCopier:
         Safe to call with a URL that's already in the list — it will no-op.
         """
         url = url.rstrip("/")
-        existing_urls = {ch["url"] for ch in self._state["channels"]}
+        existing_urls = {ch["url"]: ch for ch in self._state["channels"]}
         if url in existing_urls:
-            logger.info(f"Channel already in copier: {url}")
+            ch = existing_urls[url]
+            if not ch["all_ids"]:
+                # Previous fetch must have failed — retry now
+                logger.info(f"Re-fetching empty channel: @{ch['handle']}")
+                self._fetch_channel(ch, refresh=False)
+                self._save()
             return
 
         handle = self._handle_from_url(url)
@@ -167,6 +172,8 @@ class ChannelCopier:
                 "no_warnings": True,
                 "extract_flat": "in_playlist",
                 "playlistend": 2000,
+                "nocheckcertificate": True,
+                "ignoreerrors": True,
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
