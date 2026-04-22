@@ -2,6 +2,11 @@
 .env
 data/youtube_token.json
 
+# Runtime state — machine-specific, changes every run
+data/channel_copier.json
+data/used_videos.json
+data/viral_clips.json
+
 # Downloaded & processed videos
 data/downloaded/
 data/processed/
