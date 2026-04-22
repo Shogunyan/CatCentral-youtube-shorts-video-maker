@@ -370,3 +370,55 @@ def generate_caption_from_source(source_title: str, n: int = 5) -> dict:
         "description": generate_description(title, extra_hashtags=hashtags),
         "tags": generate_tags(hashtags),
     }
+
+
+# ── Channel-copy titles ───────────────────────────────────────────────────────
+# Used when copying videos directly from specific channels (no ranking format).
+# Picked randomly each run so the channel doesn't look repetitive.
+
+_COPY_TITLES = [
+    "You Can't Not Laugh At These Cats 😹",
+    "Funniest Cats On The Internet Right Now 🔥",
+    "These Cats Are Living Their Best Life 😂",
+    "Cats That Forgot They Were Cats 💀",
+    "Warning: This Will Make You Want A Cat 🐱",
+    "The Internet's Funniest Cat Moments 😱",
+    "Cats Being Absolutely Unhinged 😤",
+    "Try Not To Laugh — Cat Edition 😂",
+    "These Cats Have No Fear 😹",
+    "Cats That Broke The Internet This Week 🌐",
+    "Nobody Expected The Cat To Do This 💀",
+    "Cats Are Built Different And We Love It 🐾",
+    "This Is Why Cats Run The Internet 👑",
+    "Cats Doing The Most For No Reason 😭",
+    "POV: You Came For The Cats And Stayed For The Chaos 🔥",
+    "Cats That Woke Up And Chose Violence 😈",
+    "Why Are Cats Like This 😂",
+    "The Cat Said No And Walked Away 😹",
+    "Certified Cat Chaos Compilation 💥",
+    "These Cats Are Too Funny To Be Real 😱",
+    "Cats Making Their Owners Question Everything 🤣",
+    "Main Character Energy — Cat Edition 🐱",
+    "Cats That Genuinely Don't Care 😤",
+    "Just Cats Being Weird And We're Here For It 🐾",
+    "The Cats Are Not Okay And Neither Are We 😂",
+    "Cats Who Said 'Watch This' 👀",
+    "Every Cat Owner Has Seen This Happen 😹",
+    "Cat Behaviour That Can't Be Explained 💀",
+    "Cats Having The Time Of Their Lives 🎉",
+    "The Funniest Cat Clips You'll See Today 🔥",
+]
+
+
+def generate_copy_caption() -> dict:
+    """
+    Return a caption for a channel-copy video (non-ranking format).
+    Cycles through a pool of pre-written viral-style titles.
+    """
+    title = random.choice(_COPY_TITLES)
+    hashtags = ["funnycats", "catvideos", "catsoftiktok"]
+    return {
+        "title": title,
+        "description": generate_description(title, extra_hashtags=hashtags),
+        "tags": generate_tags(hashtags),
+    }

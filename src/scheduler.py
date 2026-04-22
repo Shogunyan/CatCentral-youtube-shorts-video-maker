@@ -26,7 +26,7 @@ from typing import Callable
 import schedule
 
 from config import Config
-from src.caption_gen import generate_caption, generate_caption_from_source
+from src.caption_gen import generate_caption, generate_caption_from_source, generate_copy_caption
 from src.channel_copier import ChannelCopier
 from src.downloader import Downloader
 from src.scraper import VideoScraper
@@ -202,8 +202,7 @@ class Pipeline:
         kb = source_path.stat().st_size // 1024
         self._report(40, "⬇  Downloaded", f"✓ Downloaded ({kb} KB)")
 
-        # Generate caption from channel handle as the "source title"
-        caption = generate_caption_from_source(f"cat video from {handle}", 5)
+        caption = generate_copy_caption()
         title = caption["title"]
         self._report(45, "✏  Title generated", f"Title: {title}")
 
