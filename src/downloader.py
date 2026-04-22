@@ -130,15 +130,16 @@ class Downloader:
             downloaded = self._find_existing(vid_id)
             if downloaded:
                 h = _probe_height(downloaded)
-                # Skip height filter for ranking source videos — we take what we get.
-                if h and h < MIN_CLIP_HEIGHT and platform not in ("ranking_slice", "full_ranking_short"):
+                # Skip height filter for source/copy videos — we take what we get.
+                _no_filter = ("ranking_slice", "full_ranking_short", "channel_copy")
+                if h and h < MIN_CLIP_HEIGHT and platform not in _no_filter:
                     logger.warning(
                         f"Clip too low-res ({h}p < {MIN_CLIP_HEIGHT}p), skipping {vid_id}"
                     )
                     self._cleanup(vid_id)
                     return None
-                # Never trim the full ranking Short — we need every second of it.
-                if platform != "full_ranking_short":
+                # Keep channel copy and ranking videos fully intact — no trimming.
+                if platform not in ("full_ranking_short", "channel_copy"):
                     self._trim_to_action(downloaded)
                 logger.info(f"  ✓ {downloaded.name} ({_fmt_size(downloaded)})"
                             + (f"  [{h}p]" if h else ""))
