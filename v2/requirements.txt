@@ -1,0 +1,15 @@
+# Core
+yt-dlp>=2024.1.0
+google-api-python-client>=2.100.0
+google-auth-oauthlib>=1.1.0
+google-auth-httplib2>=0.1.1
+python-dotenv>=1.0.0
+schedule>=1.2.0
+Pillow>=10.0.0
+
+# Optional — enables Claude AI title generation (set ANTHROPIC_API_KEY in .env)
+anthropic>=0.34.0
+
+# System dependency: ffmpeg (not pip-installable)
+# Ubuntu/Debian:  sudo apt install ffmpeg
+# macOS:          brew install ffmpeg
