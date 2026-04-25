@@ -7,33 +7,33 @@ import re
 # ── Title themes ─────────────────────────────────────────────────────────────
 
 THEMES = [
-    {"title": "Top 5 Funniest Cats 😂",              "tt_hashtags": ["funnycat", "top5cats", "funnycats"]},
-    {"title": "Cats Ranked 5 to 1 🏆",               "tt_hashtags": ["catranking", "catsranked", "funnycats"]},
-    {"title": "Most Viral Cat Moments 🔥",            "tt_hashtags": ["viralcat", "catmoments", "funnycats"]},
-    {"title": "5 Cats That Broke The Internet 😱",    "tt_hashtags": ["viralcat", "catinternet", "funnycats"]},
-    {"title": "Funniest Cat Clips Ranked 🐱",         "tt_hashtags": ["funnycat", "catclips", "catsranked"]},
-    {"title": "Which Cat Is Funniest? 👀",            "tt_hashtags": ["funnycat", "catpoll", "funnycats"]},
-    {"title": "Unhinged Cats Ranked 😭",              "tt_hashtags": ["unhingedcat", "chaoticcat", "crazycats"]},
-    {"title": "Wild Cat Moments 🐾",                  "tt_hashtags": ["crazycats", "wildcat", "catmoment"]},
-    {"title": "Cats Caught Being Chaotic 💀",         "tt_hashtags": ["chaoticcat", "catchaos", "funnycats"]},
-    {"title": "Top 5 Cat Reactions 😹",               "tt_hashtags": ["catreaction", "funnycat", "catsoftiktok"]},
-    {"title": "Cats Being Weird 😂",                  "tt_hashtags": ["weirdcat", "catsbeingweird", "funnycats"]},
-    {"title": "Funniest Cats On The Internet 🌐",     "tt_hashtags": ["funnycat", "internetcat", "funnycats"]},
-    {"title": "Cats Are Built Different 😤",          "tt_hashtags": ["catsdifferent", "funnycat", "crazycats"]},
-    {"title": "Cats That Went Viral 🔥",              "tt_hashtags": ["viralcat", "famouscat", "funnycats"]},
-    {"title": "Top Cat Moments You Need To See 👁️",  "tt_hashtags": ["topcat", "catmoments", "funnycats"]},
+    {"title": "This Cat Said Absolutely Not 😭",               "tt_hashtags": ["funnycat", "top5cats", "funnycats"]},
+    {"title": "The #1 Cat Will Ruin You 💀",                   "tt_hashtags": ["catranking", "catsranked", "funnycats"]},
+    {"title": "Nobody Prepared Me For Cat #1 😱",              "tt_hashtags": ["viralcat", "catmoments", "funnycats"]},
+    {"title": "These Cats Are A Menace To Society 😤",          "tt_hashtags": ["viralcat", "catinternet", "funnycats"]},
+    {"title": "I Can't Stop Watching Cat #1 🔥",               "tt_hashtags": ["funnycat", "catclips", "catsranked"]},
+    {"title": "The Audacity Of These Cats 😹",                 "tt_hashtags": ["funnycat", "catpoll", "funnycats"]},
+    {"title": "Cat #1 Is An Unhinged Menace 😭",               "tt_hashtags": ["unhingedcat", "chaoticcat", "crazycats"]},
+    {"title": "When Cats Forget They're Cats 💀",              "tt_hashtags": ["crazycats", "wildcat", "catmoment"]},
+    {"title": "Cats That Understand The Assignment 👑",         "tt_hashtags": ["chaoticcat", "catchaos", "funnycats"]},
+    {"title": "The Way Cat #1 Acted Like It Owned Everything 😂", "tt_hashtags": ["catreaction", "funnycat", "catsoftiktok"]},
+    {"title": "These Cats Are Operating On A Different Level 😱", "tt_hashtags": ["weirdcat", "catsbeingweird", "funnycats"]},
+    {"title": "Cat #1 Did NOT Have To Go That Hard 💀",         "tt_hashtags": ["funnycat", "internetcat", "funnycats"]},
+    {"title": "The #1 Cat Lives Rent Free In My Head Now 😂",   "tt_hashtags": ["catsdifferent", "funnycat", "crazycats"]},
+    {"title": "These Cats Have No Fear And No Shame 😤",        "tt_hashtags": ["viralcat", "famouscat", "funnycats"]},
+    {"title": "This Cat Said 'I Do What I Want' 😹",            "tt_hashtags": ["topcat", "catmoments", "funnycats"]},
 ]
 
 # ── Description templates ─────────────────────────────────────────────────────
 
 DESCRIPTION_INTROS = [
-    "These cats are absolutely unhinged 😂 Ranked from funny to FUNNIEST!",
-    "We found the internet's most viral cat clips and ranked them so you don't have to!",
-    "Which cat deserves the #1 spot? Drop your vote in the comments 👇",
-    "These cats are built different — ranked from wild to WILDEST!",
-    "The ultimate cat ranking has arrived. Do you agree with #1? 🏆",
-    "Your daily dose of certified unhinged cats, ranked 😹",
-    "These clips broke the internet for a reason 😱 Do you agree with the ranking?",
+    "Which cat deserves #1? 99% of people get it wrong 👇",
+    "This ranking is going to make you lose it 😭 Watch to the end",
+    "The #1 spot will surprise you — do you agree? Drop your ranking below",
+    "These cats are not normal. Ranked from wild to UNHINGED 🔥",
+    "Warning: do NOT watch this near sleeping people 😂",
+    "We ranked the internet's best cats so you don't have to. You're welcome 🏆",
+    "Cat owners will relate to every single one of these 😹",
 ]
 
 DESCRIPTION_CTAs = [
@@ -58,10 +58,9 @@ BASE_TAGS = [
 ]
 
 # ── Hashtag pool for descriptions ─────────────────────────────────────────────
-# YouTube allows up to 5000 chars in the description. We fill the remaining
-# space after the body text with hashtags to maximise discoverability.
 # The FIRST THREE hashtags YouTube finds become the video's "topic" tags shown
 # under the title — keep the most relevant ones pinned at the front.
+# Total used per video: 15 (3 pinned + 12 from the shuffled pool).
 _PINNED_HASHTAGS = ["#shorts", "#cats", "#funnycat"]
 
 _HASHTAG_POOL = [
@@ -194,29 +193,23 @@ def generate_description(
 
     # Fill remaining description space with hashtags (YouTube limit: 5000 chars).
     # Pinned tags go first (YouTube uses the first 3 as topic tags under the title).
+    pinned_lower = {t.lstrip("#").lower() for t in _PINNED_HASHTAGS}
     pool = list(_HASHTAG_POOL)
     if extra_hashtags:
-        # Prepend theme-specific hashtags that aren't already pinned
-        pinned_lower = {t.lstrip("#").lower() for t in _PINNED_HASHTAGS}
         extras = [
             f"#{ht.lstrip('#')}"
             for ht in extra_hashtags
             if ht.lstrip("#").lower() not in pinned_lower
         ]
-        pool = extras + pool
+        # Prepend extras, then deduplicate while preserving order
+        seen_tags: set[str] = set(extras)
+        deduped_pool = extras + [t for t in pool if t not in seen_tags]
+        pool = deduped_pool
     random.shuffle(pool)
-    all_tags = _PINNED_HASHTAGS + pool
 
-    max_len = 4950  # safely under the 5000-char YouTube limit
-    remaining = max_len - len(body)
-    tag_parts: list[str] = []
-    used = 0
-    for tag in all_tags:
-        sep = 1 if tag_parts else 0   # space between tags
-        if used + sep + len(tag) > remaining:
-            break
-        tag_parts.append(tag)
-        used += sep + len(tag)
+    # YouTube uses only the first 3-5 hashtags for ranking; 15 total is the sweet spot.
+    # More than ~20 triggers spam heuristics and buries the actual description.
+    tag_parts = _PINNED_HASHTAGS + pool[:12]
 
     return body + " ".join(tag_parts)
 

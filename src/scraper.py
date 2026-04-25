@@ -373,11 +373,12 @@ class VideoScraper:
                 return False
             seen.add(vid_id)
             found.append({
-                "id":         vid_id,
-                "url":        f"https://www.youtube.com/shorts/{vid_id}",
-                "title":      title or "(unknown)",
-                "view_count": views,
-                "duration":   flat_dur,
+                "id":          vid_id,
+                "url":         f"https://www.youtube.com/shorts/{vid_id}",
+                "title":       title or "(unknown)",
+                "view_count":  views,
+                "duration":    flat_dur,
+                "upload_date": e.get("upload_date") or "",  # YYYYMMDD
             })
             return True
 
@@ -450,8 +451,14 @@ class VideoScraper:
                     _accept(e, require_ranking=True, max_dur=60)
                 logger.info(f"  ytsearch '{q[:40]}' → {len(entries or [])} results, {len(found)-before} added (≤60s)")
 
-        found.sort(key=lambda x: (x.get("duration") or 999, -x["view_count"]))
-        logger.info(f"  Total: {len(found)} cat ranking Shorts with ≥{min_views:,} views")
+        # Sort: fresh (≤30 days) videos first ordered by recency, older ones after
+        cutoff = (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
+        fresh = [v for v in found if (v.get("upload_date") or "") >= cutoff]
+        stale = [v for v in found if (v.get("upload_date") or "") < cutoff or not v.get("upload_date")]
+        fresh.sort(key=lambda x: x.get("upload_date") or "", reverse=True)
+        stale.sort(key=lambda x: (x.get("duration") or 999, -x["view_count"]))
+        found = fresh + stale
+        logger.info(f"  Total: {len(found)} cat ranking Shorts with ≥{min_views:,} views ({len(fresh)} fresh ≤30d)")
         return found
 
     def _find_any_cat_shorts(self, min_views: int = 10_000) -> list[dict]:

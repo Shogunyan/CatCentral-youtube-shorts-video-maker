@@ -46,6 +46,24 @@ class ChannelCopier:
         if not channels:
             return None
 
+        # Proactively refresh any channel whose list is more than 24h stale
+        now = datetime.now()
+        refreshed_any = False
+        for ch in channels:
+            lr = ch.get("last_refreshed")
+            stale = True
+            if lr:
+                try:
+                    stale = (now - datetime.fromisoformat(lr)).total_seconds() > 86400
+                except Exception:
+                    pass
+            if stale:
+                logger.info(f"  Refreshing @{ch['handle']} (>24h since last fetch)…")
+                self._fetch_channel(ch, refresh=True)
+                refreshed_any = True
+        if refreshed_any:
+            self._save()
+
         n = len(channels)
         start_idx = self._state["next_channel_idx"] % n
 

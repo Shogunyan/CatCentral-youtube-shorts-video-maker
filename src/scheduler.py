@@ -13,6 +13,7 @@ Full pipeline per run:
 Progress is reported via an optional `reporter(percent, action, log_msg)` callable
 so the TUI (or any other caller) can display live updates.
 """
+import json
 import logging
 import random
 import signal
@@ -69,7 +70,20 @@ class Pipeline:
         for ch_url in _COPY_CHANNELS:
             self.copier.add_channel(ch_url)
 
-    # ── Reporter helper ───────────────────────────────────────────────────────
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _write_upload_log(self, video_id: str, title: str, source_id: str, mode: str) -> None:
+        log_path = self.config.data_dir / "upload_log.jsonl"
+        entry = {
+            "uploaded_at": datetime.now().isoformat(timespec="seconds"),
+            "video_id":    video_id,
+            "title":       title,
+            "source_id":   source_id,
+            "mode":        mode,
+        }
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a") as f:
+            f.write(json.dumps(entry) + "\n")
 
     def _report(self, percent: float, action: str, log_msg: str = "") -> None:
         if log_msg:
@@ -178,6 +192,8 @@ class Pipeline:
                     return False
 
             self.scraper.mark_used([full_item])
+            if not self.dry_run:
+                self._write_upload_log(video_id, caption["title"], full_item["id"], "ranking")
             self._report(100, "✅  Done! Video is live.", f"https://www.youtube.com/shorts/{video_id}")
             logger.info(f"Run {run_id} complete. video_id={video_id}")
             return True
@@ -246,6 +262,8 @@ class Pipeline:
                 return False
 
         self.copier.mark_used(video_id)
+        if not self.dry_run:
+            self._write_upload_log(uploaded_id, caption["title"], video_id, "channel_copy")
         self._report(100, "✅  Done! Video is live.",
                      f"Channel copy complete — {video_id}")
         logger.info(f"Run {run_id} complete (channel copy). video_id={uploaded_id}")
@@ -277,13 +295,19 @@ class Scheduler:
         """Register jobs and block forever (Ctrl+C to stop)."""
         check_ffmpeg()
 
+        scheduled_times = []
         for t in self.config.upload_times:
-            schedule.every().day.at(t).do(self._job)
-            logger.info(f"Scheduled daily upload at {t}")
+            h, m = map(int, t.split(":"))
+            jitter = random.randint(-10, 10)
+            total = max(0, min(23 * 60 + 59, h * 60 + m + jitter))
+            jittered = f"{total // 60:02d}:{total % 60:02d}"
+            schedule.every().day.at(jittered).do(self._job)
+            scheduled_times.append(jittered)
+            logger.info(f"Scheduled daily upload at {jittered} (±10 min jitter from {t})")
 
         logger.info(
             "Scheduler running. Upload times: "
-            + ", ".join(self.config.upload_times)
+            + ", ".join(scheduled_times)
             + "  (Ctrl+C to stop)"
         )
 
