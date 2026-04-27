@@ -101,6 +101,76 @@ def _probe_duration(path: Path) -> float:
         return 0.0
 
 
+def generate_thumbnail(
+    video_path: Path,
+    title: str,
+    output_path: Path,
+    config=None,
+) -> bool:
+    """
+    Generate a custom 1280×720 thumbnail by extracting a frame at 40% through
+    the video and overlaying the title text with branding.
+    Returns True on success, False on failure.
+    """
+    watermark = getattr(config, "watermark_text", "@CatCentral") if config else "@CatCentral"
+    duration = _probe_duration(video_path)
+    if duration <= 0:
+        return False
+
+    seek = duration * 0.40
+    clean = _clean_title(_strip_emoji(title))
+
+    words = clean.split()
+    if len(clean) > 22 and len(words) >= 2:
+        mid = max(1, len(words) // 2)
+        t1 = _escape_drawtext(" ".join(words[:mid]))
+        t2 = _escape_drawtext(" ".join(words[mid:]))
+        title_vf = (
+            f"drawtext=text='{t1}'{_FONT_B}"
+            ":fontsize=78:fontcolor=white:borderw=6:bordercolor=black@0.95"
+            ":x=(w-tw)/2:y=75,"
+            f"drawtext=text='{t2}'{_FONT_B}"
+            ":fontsize=78:fontcolor=white:borderw=6:bordercolor=black@0.95"
+            ":x=(w-tw)/2:y=170"
+        )
+    else:
+        t = _escape_drawtext(clean)
+        title_vf = (
+            f"drawtext=text='{t}'{_FONT_B}"
+            ":fontsize=80:fontcolor=white:borderw=6:bordercolor=black@0.95"
+            ":x=(w-tw)/2:y=110"
+        )
+
+    wm = _escape_drawtext(watermark)
+    vf = (
+        "scale=1280:720:force_original_aspect_ratio=increase,"
+        "crop=1280:720,"
+        "drawbox=x=0:y=0:w=1280:h=195:color=#000000@0.55:t=fill,"
+        "drawbox=x=0:y=615:w=1280:h=105:color=#000000@0.55:t=fill,"
+        f"{title_vf},"
+        f"drawtext=text='{wm}'{_FONT_P}"
+        ":fontsize=32:fontcolor=white@0.9:borderw=2:bordercolor=black@0.6"
+        ":x=w-tw-12:y=h-th-8"
+    )
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+             "-ss", f"{seek:.3f}", "-i", str(video_path),
+             "-vframes", "1", "-vf", vf, "-q:v", "3",
+             str(output_path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        ok = result.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0
+        if ok:
+            logger.info(f"  Thumbnail generated: {output_path.name}")
+        else:
+            logger.warning(f"  Thumbnail generation failed (rc={result.returncode}): {result.stderr[:200]}")
+        return ok
+    except Exception as e:
+        logger.warning(f"  Thumbnail generation error: {e}")
+        return False
+
+
 # ── Full-short mode functions ─────────────────────────────────────────────────
 
 def _extract_frame_ve(path: Path, timestamp: float) -> bytes | None:
@@ -318,11 +388,10 @@ def _add_branding(
     watermark_text: str,
 ) -> Path:
     """
-    Single ffmpeg pass that adds:
-      • 2-second attention hook at the very start (centred)
-      • Our title text centred in the top blurred bar
-      • Fixed @CatCentral watermark top-right (50% opacity)
-      • Like & Subscribe popup badge at 40% through the video
+    Single ffmpeg pass:
+      • 2-second hook at start, title bar, fixed watermark (always on)
+      • L&S badge at 40%  •  Comment prompt at 70%  •  Subscribe at last 3s
+    Audio normalized to EBU R128 -14 LUFS for consistent volume.
     """
     wm  = _escape_drawtext(watermark_text)
     ttl = _escape_drawtext(_clean_title(_strip_emoji(title)))
@@ -330,23 +399,22 @@ def _add_branding(
         ttl = ttl[:40] + "..."
     pad = 55
 
-    # Fixed top-right watermark — one position, semi-transparent
-    wm_filter = (
-        f"drawtext=text='{wm}'{_FONT_P}"
-        ":fontsize=34:fontcolor=white@0.5"
-        ":borderw=2:bordercolor=black@0.4"
-        f":x=w-tw-{pad}:y={pad+20}"
-    )
+    # Probe once so all timed enables use the same duration value
+    duration = _probe_duration(input_path)
 
-    # Title in top bar — max(10,...) prevents negative x when title is wide
+    # ── Always-on overlays ────────────────────────────────────────────────────
     title_filter = (
         f"drawtext=text='{ttl}'{_FONT_B}"
         ":fontsize=38:fontcolor=white"
         ":borderw=3:bordercolor=black@0.8"
         ":x=max(10\\,(w-tw)/2):y=58"
     )
-
-    # 2-second hook at the start — large centred text to hook the viewer
+    wm_filter = (
+        f"drawtext=text='{wm}'{_FONT_P}"
+        ":fontsize=34:fontcolor=white@0.5"
+        ":borderw=2:bordercolor=black@0.4"
+        f":x=w-tw-{pad}:y={pad+20}"
+    )
     hook_filter = (
         f"drawtext=text='Which cat is #1\\?'{_FONT_B}"
         ":fontsize=58:fontcolor=white"
@@ -355,42 +423,49 @@ def _add_branding(
         ":enable='between(t,0,2)'"
     )
 
-    # L&S popup at 40% through the video — viewers are hooked by then
-    duration = _probe_duration(input_path)
+    # ── Time-based badges — all driven from probed duration ───────────────────
     if duration > 0:
-        t40 = duration * 0.40
-        t43 = t40 + 3.0
-        popup_enable = f"between(t,{t40:.2f},{t43:.2f})"
+        t40 = duration * 0.40;  t43 = t40 + 3.0
+        t70 = duration * 0.70;  t72 = t70 + 2.5
+        t_end = max(0.0, duration - 3.0)
+        pop_en  = f"between(t,{t40:.2f},{t43:.2f})"
+        cmt_en  = f"between(t,{t70:.2f},{t72:.2f})"
+        end_en  = f"between(t,{t_end:.2f},{duration:.2f})"
     else:
-        popup_enable = "between(t,8,11)"
+        pop_en  = "between(t,8,11)"
+        cmt_en  = "between(t,17,19.5)"
+        end_en  = "between(t,27,30)"
 
-    popup_box = (
-        f"drawbox=x=280:y=1710:w=520:h=88"
-        ":color=#EE1111@0.88:t=fill"
-        f":enable='{popup_enable}'"
-    )
-    popup_text = (
-        f"drawtext=text='LIKE \\& SUBSCRIBE'{_FONT_B}"
-        ":fontsize=40:fontcolor=white"
-        ":borderw=3:bordercolor=black@0.8"
-        ":x=(w-tw)/2:y=1728"
-        f":enable='{popup_enable}'"
-    )
-    popup_hint = (
-        f"drawtext=text='for more cat videos'{_FONT_P}"
-        ":fontsize=24:fontcolor=white@0.8"
-        ":borderw=2:bordercolor=black@0.6"
-        ":x=(w-tw)/2:y=1768"
-        f":enable='{popup_enable}'"
-    )
+    # L&S popup — red badge at 40%
+    popup_box  = f"drawbox=x=280:y=1710:w=520:h=88:color=#EE1111@0.88:t=fill:enable='{pop_en}'"
+    popup_text = (f"drawtext=text='LIKE \\& SUBSCRIBE'{_FONT_B}:fontsize=40:fontcolor=white"
+                  f":borderw=3:bordercolor=black@0.8:x=(w-tw)/2:y=1728:enable='{pop_en}'")
+    popup_hint = (f"drawtext=text='for more cat videos'{_FONT_P}:fontsize=24:fontcolor=white@0.8"
+                  f":borderw=2:bordercolor=black@0.6:x=(w-tw)/2:y=1768:enable='{pop_en}'")
 
-    vf = f"{title_filter},{wm_filter},{hook_filter},{popup_box},{popup_text},{popup_hint}"
+    # Comment bait — blue badge at 70%
+    cmt_box  = f"drawbox=x=160:y=1710:w=760:h=82:color=#1a3a8a@0.88:t=fill:enable='{cmt_en}'"
+    cmt_text = (f"drawtext=text='Drop your ranking in the comments\\!'{_FONT_B}:fontsize=32"
+                f":fontcolor=white:borderw=2:bordercolor=black@0.8:x=(w-tw)/2:y=1732:enable='{cmt_en}'")
+
+    # End-screen subscribe — dark badge in last 3 seconds
+    end_box  = f"drawbox=x=160:y=1718:w=760:h=74:color=#111111@0.90:t=fill:enable='{end_en}'"
+    end_text = (f"drawtext=text='SUBSCRIBE FOR MORE'{_FONT_B}:fontsize=36:fontcolor=white"
+                f":borderw=3:bordercolor=#EE1111@0.9:x=(w-tw)/2:y=1735:enable='{end_en}'")
+
+    vf = (
+        f"{title_filter},{wm_filter},{hook_filter},"
+        f"{popup_box},{popup_text},{popup_hint},"
+        f"{cmt_box},{cmt_text},"
+        f"{end_box},{end_text}"
+    )
 
     _ffmpeg(
         "-i", str(input_path),
         "-vf", vf,
         "-c:v", VIDEO_CODEC, "-crf", VIDEO_CRF, "-preset", "fast",
-        "-c:a", "copy",
+        "-c:a", "aac", "-b:a", "128k", "-ac", "2",
+        "-af", "loudnorm=I=-14:LRA=7:TP=-2",
         "-movflags", "+faststart",
         str(output_path),
     )
@@ -451,11 +526,11 @@ def apply_watermark_only(
     config,
 ) -> None:
     """
-    Minimal processing for channel-copy videos:
+    Channel-copy video processing:
       • Scale to 1080×1920 (letterbox if needed)
       • Fixed @CatCentral watermark top-right (50% opacity)
-      • Like & Subscribe popup at 40% through the video
-    No blur, no title bar — the source video is kept intact.
+      • L&S badge at 40%  •  Comment prompt at 70%  •  Subscribe at last 3s
+    Audio normalized to EBU R128 -14 LUFS.
     """
     watermark_text = getattr(config, "watermark_text", "@CatCentral")
     wm = _escape_drawtext(watermark_text)
@@ -465,7 +540,6 @@ def apply_watermark_only(
         "scale=1080:1920:force_original_aspect_ratio=decrease,"
         "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black"
     )
-    # Fixed top-right watermark — semi-transparent, no movement
     wm_filter = (
         f"drawtext=text='{wm}'{_FONT_P}"
         ":fontsize=34:fontcolor=white@0.5"
@@ -473,41 +547,43 @@ def apply_watermark_only(
         f":x=w-tw-{pad}:y={pad+20}"
     )
 
-    # L&S popup at 40% through the video — viewers are hooked by then
     duration = _probe_duration(source_path)
     if duration > 0:
-        t40 = duration * 0.40
-        t43 = t40 + 3.0
-        popup_enable = f"between(t,{t40:.2f},{t43:.2f})"
+        t40 = duration * 0.40;  t43 = t40 + 3.0
+        t70 = duration * 0.70;  t72 = t70 + 2.5
+        t_end = max(0.0, duration - 3.0)
+        pop_en  = f"between(t,{t40:.2f},{t43:.2f})"
+        cmt_en  = f"between(t,{t70:.2f},{t72:.2f})"
+        end_en  = f"between(t,{t_end:.2f},{duration:.2f})"
     else:
-        popup_enable = "between(t,8,11)"
+        pop_en  = "between(t,8,11)"
+        cmt_en  = "between(t,17,19.5)"
+        end_en  = "between(t,27,30)"
 
-    popup_box = (
-        "drawbox=x=280:y=1710:w=520:h=88"
-        ":color=#EE1111@0.88:t=fill"
-        f":enable='{popup_enable}'"
-    )
-    popup_text = (
-        f"drawtext=text='LIKE \\& SUBSCRIBE'{_FONT_B}"
-        ":fontsize=40:fontcolor=white"
-        ":borderw=3:bordercolor=black@0.8"
-        ":x=(w-tw)/2:y=1728"
-        f":enable='{popup_enable}'"
-    )
-    popup_hint = (
-        f"drawtext=text='for more cat videos'{_FONT_P}"
-        ":fontsize=24:fontcolor=white@0.8"
-        ":borderw=2:bordercolor=black@0.6"
-        ":x=(w-tw)/2:y=1768"
-        f":enable='{popup_enable}'"
-    )
+    popup_box  = f"drawbox=x=280:y=1710:w=520:h=88:color=#EE1111@0.88:t=fill:enable='{pop_en}'"
+    popup_text = (f"drawtext=text='LIKE \\& SUBSCRIBE'{_FONT_B}:fontsize=40:fontcolor=white"
+                  f":borderw=3:bordercolor=black@0.8:x=(w-tw)/2:y=1728:enable='{pop_en}'")
+    popup_hint = (f"drawtext=text='for more cat videos'{_FONT_P}:fontsize=24:fontcolor=white@0.8"
+                  f":borderw=2:bordercolor=black@0.6:x=(w-tw)/2:y=1768:enable='{pop_en}'")
+
+    cmt_box  = f"drawbox=x=160:y=1710:w=760:h=82:color=#1a3a8a@0.88:t=fill:enable='{cmt_en}'"
+    cmt_text = (f"drawtext=text='Comment your fav moment below\\!'{_FONT_B}:fontsize=32"
+                f":fontcolor=white:borderw=2:bordercolor=black@0.8:x=(w-tw)/2:y=1732:enable='{cmt_en}'")
+
+    end_box  = f"drawbox=x=160:y=1718:w=760:h=74:color=#111111@0.90:t=fill:enable='{end_en}'"
+    end_text = (f"drawtext=text='SUBSCRIBE FOR MORE'{_FONT_B}:fontsize=36:fontcolor=white"
+                f":borderw=3:bordercolor=#EE1111@0.9:x=(w-tw)/2:y=1735:enable='{end_en}'")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     _ffmpeg(
         "-i", str(source_path),
-        "-vf", f"{scale_filter},{wm_filter},{popup_box},{popup_text},{popup_hint}",
+        "-vf", (f"{scale_filter},{wm_filter},"
+                f"{popup_box},{popup_text},{popup_hint},"
+                f"{cmt_box},{cmt_text},"
+                f"{end_box},{end_text}"),
         "-c:v", VIDEO_CODEC, "-crf", VIDEO_CRF, "-preset", "fast",
-        "-c:a", "copy",
+        "-c:a", "aac", "-b:a", "128k", "-ac", "2",
+        "-af", "loudnorm=I=-14:LRA=7:TP=-2",
         "-movflags", "+faststart",
         str(output_path),
     )

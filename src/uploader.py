@@ -11,6 +11,7 @@ data/youtube_token.json.
 import json
 import logging
 import os
+import random
 import re
 import subprocess
 import webbrowser
@@ -82,8 +83,18 @@ def _open_browser(url: str) -> None:
     print(f"\n  Please open this URL in your browser to authenticate:\n  {url}\n")
 
 SCOPES = [
-    "https://www.googleapis.com/auth/youtube.upload",
-    "https://www.googleapis.com/auth/youtube.readonly",   # needed for view-count checks
+    "https://www.googleapis.com/auth/youtube",            # upload, read, thumbnail, playlist
+    "https://www.googleapis.com/auth/youtube.force-ssl",  # required for comment insertion
+]
+
+_FIRST_COMMENTS = [
+    "Which cat was your #1? Drop your ranking below! 👇🐱",
+    "Comment your ranking — do you agree with #1? 👀",
+    "Which cat was the funniest? Drop it below! 😹",
+    "Did cat #1 actually get you? Comment your ranking! 💀",
+    "Tag someone who needs to see this 😂 Drop your ranking below 👇",
+    "What's your #1? Comment below and let us know 🏆",
+    "Could you agree with this ranking? Reply with yours! 🐱",
 ]
 API_SERVICE_NAME = "youtube"
 API_VERSION = "v3"
@@ -96,6 +107,7 @@ class YouTubeUploader:
     def __init__(self, config):
         self.config = config
         self._service = None
+        self._playlist_id: str | None = None  # cached after first lookup
 
     # ── Authentication ─────────────────────────────────────────────────────────
 
@@ -110,7 +122,13 @@ class YouTubeUploader:
                 logger.warning(f"Could not load saved token: {e}")
 
         if creds and creds.valid:
-            return creds
+            # Re-auth if the stored token predates the expanded scope list
+            token_scopes = set(creds.scopes or [])
+            if token_scopes and not all(s in token_scopes for s in SCOPES):
+                logger.info("Stored token missing required scopes — re-authenticating…")
+                creds = None
+            else:
+                return creds
 
         if creds and creds.expired and creds.refresh_token:
             try:
@@ -163,6 +181,7 @@ class YouTubeUploader:
         description: str,
         tags: list[str],
         made_for_kids: bool = False,
+        thumbnail_path: Path | None = None,
     ) -> str | None:
         """
         Upload a video to YouTube as a Short.
@@ -208,7 +227,7 @@ class YouTubeUploader:
         )
         if not _api_ready:
             logger.info("YouTube API credentials not configured — going straight to browser upload…")
-            return self._browser_upload(video_path, title, description)
+            return self._browser_upload(video_path, title, description, thumbnail_path=thumbnail_path)
 
         logger.info(f"Uploading: {title!r} ({video_path.name})")
         try:
@@ -228,28 +247,30 @@ class YouTubeUploader:
 
             if not response:
                 logger.error("Upload loop exited but response is empty — trying browser fallback…")
-                return self._browser_upload(video_path, title, description)
+                return self._browser_upload(video_path, title, description, thumbnail_path=thumbnail_path)
             video_id = response.get("id", "")
             if not video_id:
                 logger.error("Upload response had no video ID — trying browser fallback…")
-                return self._browser_upload(video_path, title, description)
+                return self._browser_upload(video_path, title, description, thumbnail_path=thumbnail_path)
             logger.info(f"  ✓ Uploaded! https://www.youtube.com/shorts/{video_id}")
+            self.post_upload_actions(video_id, title, thumbnail_path)
             return video_id
 
         except HttpError as e:
             logger.error(f"YouTube API error: {e.resp.status} — {e.content.decode('utf-8', errors='replace')}")
             logger.info("API upload failed — trying browser fallback…")
-            return self._browser_upload(video_path, title, description)
+            return self._browser_upload(video_path, title, description, thumbnail_path=thumbnail_path)
         except Exception as e:
             logger.error(f"Upload failed: {e}")
             logger.info("Upload exception — trying browser fallback…")
-            return self._browser_upload(video_path, title, description)
+            return self._browser_upload(video_path, title, description, thumbnail_path=thumbnail_path)
 
     def _browser_upload(
         self,
         video_path: Path,
         title: str,
         description: str,
+        thumbnail_path: Path | None = None,
     ) -> str | None:
         """
         Upload via Chromium using a persistent profile to preserve the session.
@@ -564,6 +585,33 @@ class YouTubeUploader:
 
                 _ss("15_details_filled")
 
+                # ── Upload custom thumbnail (optional) ────────────────────────
+                if thumbnail_path and thumbnail_path.exists():
+                    try:
+                        logger.info("  Uploading custom thumbnail via browser…")
+                        uploaded_thumb = False
+                        for thumb_loc in [
+                            page.get_by_text("Upload thumbnail", exact=False),
+                            page.locator('ytcp-file-upload input[type="file"]'),
+                            page.locator('input[type="file"][accept*="image"]'),
+                        ]:
+                            if thumb_loc.count() > 0:
+                                try:
+                                    with page.expect_file_chooser(timeout=5_000) as fc:
+                                        thumb_loc.first.click()
+                                    fc.value.set_files(str(thumbnail_path))
+                                    page.wait_for_timeout(2_000)
+                                    logger.info("  ✓ Thumbnail uploaded via browser")
+                                    uploaded_thumb = True
+                                    break
+                                except Exception:
+                                    pass
+                        if not uploaded_thumb:
+                            logger.info("  Thumbnail upload button not found — skipping")
+                    except Exception as te:
+                        logger.warning(f"  Browser thumbnail upload failed: {te}")
+                _ss("15b_thumbnail")
+
                 # ── Walk the upload wizard ─────────────────────────────────────
                 # Stop as soon as the Visibility/Public radio button appears.
                 # get_by_role pierces shadow DOM, so 'Next' matches ytcp-button
@@ -690,6 +738,8 @@ class YouTubeUploader:
                     m = re.search(r'"videoId"\s*:\s*"([A-Za-z0-9_-]{11})"', page.content())
                 video_id = m.group(1) if m else "BROWSER_UPLOAD_OK"
                 logger.info(f"  ✓ Browser upload complete — {video_id}")
+                # Thumbnail was handled inline; run API-based playlist + comment
+                self.post_upload_actions(video_id, title, thumbnail_path=None)
                 return video_id
 
             except PWTimeout as e:
@@ -711,6 +761,142 @@ class YouTubeUploader:
                 return None
             finally:
                 ctx.close()
+
+    # ── Post-upload enhancements ───────────────────────────────────────────────
+
+    def _upload_thumbnail_api(self, video_id: str, thumbnail_path: Path) -> bool:
+        """Upload a custom thumbnail via the YouTube Data API."""
+        try:
+            service = self._get_service()
+            media = MediaFileUpload(str(thumbnail_path), mimetype="image/jpeg")
+            service.thumbnails().set(videoId=video_id, media_body=media).execute()
+            logger.info("  ✓ Thumbnail uploaded via API")
+            return True
+        except HttpError as e:
+            logger.warning(f"  Thumbnail API upload failed ({e.resp.status}): "
+                           f"{e.content.decode('utf-8', errors='replace')[:200]}")
+            return False
+        except Exception as e:
+            logger.warning(f"  Thumbnail API upload error: {e}")
+            return False
+
+    def _ensure_playlist(self) -> str | None:
+        """Return the CatCentral playlist ID, creating it once if needed."""
+        if self._playlist_id:
+            return self._playlist_id
+        try:
+            service = self._get_service()
+            resp = service.playlists().list(
+                part="snippet", mine=True, maxResults=50
+            ).execute()
+            for item in resp.get("items", []):
+                if "catcentral" in item["snippet"]["title"].lower():
+                    self._playlist_id = item["id"]
+                    logger.info(f"  Found playlist: {item['snippet']['title']}")
+                    return self._playlist_id
+            # Not found — create it
+            pl = service.playlists().insert(
+                part="snippet,status",
+                body={
+                    "snippet": {
+                        "title": "CatCentral — Cat Ranking Shorts",
+                        "description": "Daily cat ranking Shorts — new video every day! 🐱",
+                    },
+                    "status": {"privacyStatus": "public"},
+                },
+            ).execute()
+            self._playlist_id = pl["id"]
+            logger.info(f"  ✓ Created playlist ({self._playlist_id})")
+            return self._playlist_id
+        except Exception as e:
+            logger.warning(f"  Playlist get/create failed: {e}")
+            return None
+
+    def add_to_playlist(self, video_id: str) -> bool:
+        """Add a video to the CatCentral playlist."""
+        try:
+            pl_id = self._ensure_playlist()
+            if not pl_id:
+                return False
+            service = self._get_service()
+            service.playlistItems().insert(
+                part="snippet",
+                body={
+                    "snippet": {
+                        "playlistId": pl_id,
+                        "resourceId": {"kind": "youtube#video", "videoId": video_id},
+                    }
+                },
+            ).execute()
+            logger.info("  ✓ Added to playlist")
+            return True
+        except HttpError as e:
+            logger.warning(f"  Playlist add failed ({e.resp.status})")
+            return False
+        except Exception as e:
+            logger.warning(f"  Playlist add error: {e}")
+            return False
+
+    def post_comment(self, video_id: str) -> bool:
+        """Post a first engagement-driving comment on the uploaded video."""
+        comment = random.choice(_FIRST_COMMENTS)
+        try:
+            service = self._get_service()
+            service.commentThreads().insert(
+                part="snippet",
+                body={
+                    "snippet": {
+                        "videoId": video_id,
+                        "topLevelComment": {
+                            "snippet": {"textOriginal": comment}
+                        },
+                    }
+                },
+            ).execute()
+            logger.info(f"  ✓ First comment posted")
+            return True
+        except HttpError as e:
+            logger.warning(f"  Comment post failed ({e.resp.status}): "
+                           f"{e.content.decode('utf-8', errors='replace')[:200]}")
+            return False
+        except Exception as e:
+            logger.warning(f"  Comment post error: {e}")
+            return False
+
+    def post_upload_actions(
+        self,
+        video_id: str,
+        title: str,
+        thumbnail_path: Path | None = None,
+    ) -> None:
+        """
+        Run all post-upload enhancements after a successful upload:
+          1. Upload custom thumbnail (if provided and API available)
+          2. Add video to the CatCentral playlist
+          3. Post a first engagement-driving comment
+        All failures are logged and silently swallowed — never block the pipeline.
+        """
+        if not video_id or video_id in ("DRY_RUN", "BROWSER_UPLOAD_OK"):
+            return
+
+        _client_id = getattr(self.config, "google_client_id", "")
+        _api_ready = (
+            _client_id
+            and "your_client_id_here" not in _client_id
+            and ".apps.googleusercontent.com" in _client_id
+        )
+        if not _api_ready:
+            logger.info("  Post-upload actions skipped — API credentials not configured")
+            return
+
+        import time as _time
+        _time.sleep(5)  # Let YouTube finish indexing before hitting the API
+
+        if thumbnail_path and thumbnail_path.exists():
+            self._upload_thumbnail_api(video_id, thumbnail_path)
+
+        self.add_to_playlist(video_id)
+        self.post_comment(video_id)
 
     def get_video_stats(self, video_ids: list[str]) -> dict[str, int]:
         """

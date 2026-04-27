@@ -176,6 +176,12 @@ class Pipeline:
                 logger.error(f"Video creation failed: {e}", exc_info=True)
                 return False
 
+            # Generate thumbnail from processed video before uploading
+            from src.video_editor import generate_thumbnail
+            thumb_path = output_path.with_suffix(".jpg")
+            if not self.dry_run:
+                generate_thumbnail(output_path, title, thumb_path, self.config)
+
             # Upload + mark used (same as existing flow)
             self._report(90, "📤  Uploading to YouTube…", "Starting upload…")
             if self.dry_run:
@@ -186,6 +192,7 @@ class Pipeline:
                     title=caption["title"],
                     description=caption["description"],
                     tags=caption["tags"],
+                    thumbnail_path=thumb_path if thumb_path.exists() else None,
                 )
                 if not video_id:
                     self._report(90, "❌  Upload failed", "YouTube upload returned no ID")
@@ -238,17 +245,25 @@ class Pipeline:
             logger.error(f"Watermark step failed: {e}", exc_info=True)
             return False
 
+        # Generate thumbnail before upload
+        from src.video_editor import generate_thumbnail
+        thumb_path = output_path.with_suffix(".jpg")
+        if not self.dry_run:
+            generate_thumbnail(output_path, caption["title"], thumb_path, self.config)
+
         self._report(80, "📤  Uploading…", "Starting upload…")
         if self.dry_run:
             uploaded_id = "DRY_RUN"
         else:
             uploaded_id = None
+            thumb_arg = thumb_path if thumb_path.exists() else None
             for attempt in range(1, 4):
                 uploaded_id = self.uploader.upload(
                     video_path=output_path,
                     title=caption["title"],
                     description=caption["description"],
                     tags=caption["tags"],
+                    thumbnail_path=thumb_arg,
                 )
                 if uploaded_id:
                     break
