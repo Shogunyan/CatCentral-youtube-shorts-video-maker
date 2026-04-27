@@ -253,7 +253,7 @@ class YouTubeUploader:
                 logger.error("Upload response had no video ID — trying browser fallback…")
                 return self._browser_upload(video_path, title, description, thumbnail_path=thumbnail_path)
             logger.info(f"  ✓ Uploaded! https://www.youtube.com/shorts/{video_id}")
-            self.post_upload_actions(video_id, title, thumbnail_path)
+            self.post_upload_actions(video_id, title, thumbnail_path, video_path=video_path)
             return video_id
 
         except HttpError as e:
@@ -732,14 +732,31 @@ class YouTubeUploader:
                 _ss("18_published")
                 logger.info(f"  Post-publish URL: {page.url[:120]}")
 
-                # Extract video ID from URL or page source
-                m = re.search(r'/video/([A-Za-z0-9_-]{11})', page.url)
-                if not m:
-                    m = re.search(r'"videoId"\s*:\s*"([A-Za-z0-9_-]{11})"', page.content())
-                video_id = m.group(1) if m else "BROWSER_UPLOAD_OK"
+                # Extract video ID — try multiple patterns; wait up to 9 extra seconds
+                _id_patterns = [
+                    r'/video/([A-Za-z0-9_-]{11})',
+                    r'/shorts/([A-Za-z0-9_-]{11})',
+                    r'[?&]v=([A-Za-z0-9_-]{11})',
+                    r'"videoId"\s*:\s*"([A-Za-z0-9_-]{11})"',
+                    r'"id"\s*:\s*"([A-Za-z0-9_-]{11})"',
+                ]
+                video_id = None
+                for _attempt in range(3):
+                    _haystack = page.url + " " + page.content()
+                    for _pat in _id_patterns:
+                        _m = re.search(_pat, _haystack)
+                        if _m and _m.group(1) not in ("undefined", "null"):
+                            video_id = _m.group(1)
+                            break
+                    if video_id:
+                        break
+                    if _attempt < 2:
+                        logger.info(f"  Waiting for video ID (attempt {_attempt + 1}/3)…")
+                        page.wait_for_timeout(3_000)
+                video_id = video_id or "BROWSER_UPLOAD_OK"
                 logger.info(f"  ✓ Browser upload complete — {video_id}")
                 # Thumbnail was handled inline; run API-based playlist + comment
-                self.post_upload_actions(video_id, title, thumbnail_path=None)
+                self.post_upload_actions(video_id, title, thumbnail_path=None, video_path=video_path)
                 return video_id
 
             except PWTimeout as e:
@@ -837,6 +854,48 @@ class YouTubeUploader:
             logger.warning(f"  Playlist add error: {e}")
             return False
 
+    def upload_captions(self, video_id: str, vtt_content: str, language: str = "en") -> bool:
+        """Upload WebVTT captions via the YouTube Data API (improves search indexing)."""
+        import tempfile
+        tmp_path = None
+        try:
+            service = self._get_service()
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".vtt", delete=False, encoding="utf-8"
+            ) as f:
+                f.write(vtt_content)
+                tmp_path = f.name
+            media = MediaFileUpload(tmp_path, mimetype="text/vtt")
+            service.captions().insert(
+                part="snippet",
+                body={
+                    "snippet": {
+                        "videoId": video_id,
+                        "language": language,
+                        "name": "English",
+                        "isDraft": False,
+                    }
+                },
+                media_body=media,
+            ).execute()
+            logger.info("  ✓ Captions uploaded")
+            return True
+        except HttpError as e:
+            logger.warning(
+                f"  Caption upload failed ({e.resp.status}): "
+                f"{e.content.decode('utf-8', errors='replace')[:200]}"
+            )
+            return False
+        except Exception as e:
+            logger.warning(f"  Caption upload error: {e}")
+            return False
+        finally:
+            if tmp_path:
+                try:
+                    Path(tmp_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+
     def post_comment(self, video_id: str) -> bool:
         """Post a first engagement-driving comment on the uploaded video."""
         comment = random.choice(_FIRST_COMMENTS)
@@ -868,12 +927,14 @@ class YouTubeUploader:
         video_id: str,
         title: str,
         thumbnail_path: Path | None = None,
+        video_path: Path | None = None,
     ) -> None:
         """
         Run all post-upload enhancements after a successful upload:
           1. Upload custom thumbnail (if provided and API available)
           2. Add video to the CatCentral playlist
           3. Post a first engagement-driving comment
+          4. Upload auto-generated WebVTT captions (improves search indexing)
         All failures are logged and silently swallowed — never block the pipeline.
         """
         if not video_id or video_id in ("DRY_RUN", "BROWSER_UPLOAD_OK"):
@@ -897,6 +958,18 @@ class YouTubeUploader:
 
         self.add_to_playlist(video_id)
         self.post_comment(video_id)
+
+        # Upload captions — helps YouTube index the content for search
+        if video_path and video_path.exists():
+            try:
+                from src.caption_gen import generate_srt
+                from src.video_editor import probe_duration
+                dur = probe_duration(video_path)
+                if dur > 0:
+                    vtt = generate_srt(title, dur, n_clips=5, is_ranking=True)
+                    self.upload_captions(video_id, vtt)
+            except Exception as e:
+                logger.warning(f"  Caption generation/upload failed: {e}")
 
     def get_video_stats(self, video_ids: list[str]) -> dict[str, int]:
         """

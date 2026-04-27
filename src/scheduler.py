@@ -177,10 +177,19 @@ class Pipeline:
                 return False
 
             # Generate thumbnail from processed video before uploading
-            from src.video_editor import generate_thumbnail
+            from src.video_editor import generate_thumbnail, probe_duration
             thumb_path = output_path.with_suffix(".jpg")
             if not self.dry_run:
                 generate_thumbnail(output_path, title, thumb_path, self.config)
+
+            # Append YouTube chapter timestamps to description (helps navigation + SEO)
+            if not self.dry_run:
+                from src.caption_gen import generate_chapter_timestamps
+                vid_dur = probe_duration(output_path)
+                if vid_dur > 0:
+                    chapters = generate_chapter_timestamps(vid_dur, n)
+                    if chapters:
+                        caption["description"] = caption["description"].rstrip() + "\n\n" + chapters
 
             # Upload + mark used (same as existing flow)
             self._report(90, "📤  Uploading to YouTube…", "Starting upload…")

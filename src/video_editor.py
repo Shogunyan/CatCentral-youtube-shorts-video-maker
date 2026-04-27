@@ -101,6 +101,11 @@ def _probe_duration(path: Path) -> float:
         return 0.0
 
 
+def probe_duration(path: Path) -> float:
+    """Public wrapper — returns video duration in seconds, or 0.0 on failure."""
+    return _probe_duration(path)
+
+
 def generate_thumbnail(
     video_path: Path,
     title: str,
@@ -415,6 +420,11 @@ def _add_branding(
         ":borderw=2:bordercolor=black@0.4"
         f":x=w-tw-{pad}:y={pad+20}"
     )
+    # Dark box behind hook text improves readability on bright backgrounds
+    hook_bg = (
+        "drawbox=x=0:y=(h-100)/2:w=w:h=100:color=#000000@0.60:t=fill"
+        ":enable='between(t,0,2)'"
+    )
     hook_filter = (
         f"drawtext=text='Which cat is #1\\?'{_FONT_B}"
         ":fontsize=58:fontcolor=white"
@@ -425,16 +435,21 @@ def _add_branding(
 
     # ── Time-based badges — all driven from probed duration ───────────────────
     if duration > 0:
-        t40 = duration * 0.40;  t43 = t40 + 3.0
-        t70 = duration * 0.70;  t72 = t70 + 2.5
+        t40   = duration * 0.40;  t43  = t40 + 3.0
+        t70   = duration * 0.70;  t72  = t70 + 2.5
+        t83   = duration * 0.83
         t_end = max(0.0, duration - 3.0)
         pop_en  = f"between(t,{t40:.2f},{t43:.2f})"
         cmt_en  = f"between(t,{t70:.2f},{t72:.2f})"
         end_en  = f"between(t,{t_end:.2f},{duration:.2f})"
+        # Share prompt ends before end-screen starts (with 0.5s buffer)
+        shr_end = min(t83 + 2.5, t_end - 0.5)
+        shr_en  = f"between(t,{t83:.2f},{shr_end:.2f})" if shr_end > t83 + 0.5 else None
     else:
-        pop_en  = "between(t,8,11)"
-        cmt_en  = "between(t,17,19.5)"
-        end_en  = "between(t,27,30)"
+        pop_en = "between(t,8,11)"
+        cmt_en = "between(t,17,19.5)"
+        end_en = "between(t,27,30)"
+        shr_en = "between(t,22,24.5)"
 
     # L&S popup — red badge at 40%
     popup_box  = f"drawbox=x=280:y=1710:w=520:h=88:color=#EE1111@0.88:t=fill:enable='{pop_en}'"
@@ -448,22 +463,34 @@ def _add_branding(
     cmt_text = (f"drawtext=text='Drop your ranking in the comments\\!'{_FONT_B}:fontsize=32"
                 f":fontcolor=white:borderw=2:bordercolor=black@0.8:x=(w-tw)/2:y=1732:enable='{cmt_en}'")
 
+    # Share prompt — green badge at 83% (strongest algorithm signal)
+    if shr_en:
+        shr_box  = f"drawbox=x=160:y=1710:w=760:h=74:color=#116611@0.88:t=fill:enable='{shr_en}'"
+        shr_text = (f"drawtext=text='Share with a cat lover\\!'{_FONT_B}:fontsize=34"
+                    f":fontcolor=white:borderw=2:bordercolor=black@0.8:x=(w-tw)/2:y=1733:enable='{shr_en}'")
+    else:
+        shr_box = shr_text = ""
+
     # End-screen subscribe — dark badge in last 3 seconds
     end_box  = f"drawbox=x=160:y=1718:w=760:h=74:color=#111111@0.90:t=fill:enable='{end_en}'"
     end_text = (f"drawtext=text='SUBSCRIBE FOR MORE'{_FONT_B}:fontsize=36:fontcolor=white"
                 f":borderw=3:bordercolor=#EE1111@0.9:x=(w-tw)/2:y=1735:enable='{end_en}'")
 
-    vf = (
-        f"{title_filter},{wm_filter},{hook_filter},"
-        f"{popup_box},{popup_text},{popup_hint},"
-        f"{cmt_box},{cmt_text},"
-        f"{end_box},{end_text}"
-    )
+    vf_parts = [
+        title_filter, wm_filter, hook_bg, hook_filter,
+        popup_box, popup_text, popup_hint,
+        cmt_box, cmt_text,
+    ]
+    if shr_box:
+        vf_parts += [shr_box, shr_text]
+    vf_parts += [end_box, end_text]
+    vf = ",".join(vf_parts)
 
     _ffmpeg(
         "-i", str(input_path),
+        "-map", "0:v:0", "-map", "0:a?",
         "-vf", vf,
-        "-c:v", VIDEO_CODEC, "-crf", VIDEO_CRF, "-preset", "fast",
+        "-c:v", VIDEO_CODEC, "-crf", VIDEO_CRF, "-preset", "medium",
         "-c:a", "aac", "-b:a", "128k", "-ac", "2",
         "-af", "loudnorm=I=-14:LRA=7:TP=-2",
         "-movflags", "+faststart",
@@ -549,16 +576,20 @@ def apply_watermark_only(
 
     duration = _probe_duration(source_path)
     if duration > 0:
-        t40 = duration * 0.40;  t43 = t40 + 3.0
-        t70 = duration * 0.70;  t72 = t70 + 2.5
+        t40   = duration * 0.40;  t43  = t40 + 3.0
+        t70   = duration * 0.70;  t72  = t70 + 2.5
+        t83   = duration * 0.83
         t_end = max(0.0, duration - 3.0)
         pop_en  = f"between(t,{t40:.2f},{t43:.2f})"
         cmt_en  = f"between(t,{t70:.2f},{t72:.2f})"
         end_en  = f"between(t,{t_end:.2f},{duration:.2f})"
+        shr_end = min(t83 + 2.5, t_end - 0.5)
+        shr_en  = f"between(t,{t83:.2f},{shr_end:.2f})" if shr_end > t83 + 0.5 else None
     else:
-        pop_en  = "between(t,8,11)"
-        cmt_en  = "between(t,17,19.5)"
-        end_en  = "between(t,27,30)"
+        pop_en = "between(t,8,11)"
+        cmt_en = "between(t,17,19.5)"
+        end_en = "between(t,27,30)"
+        shr_en = "between(t,22,24.5)"
 
     popup_box  = f"drawbox=x=280:y=1710:w=520:h=88:color=#EE1111@0.88:t=fill:enable='{pop_en}'"
     popup_text = (f"drawtext=text='LIKE \\& SUBSCRIBE'{_FONT_B}:fontsize=40:fontcolor=white"
@@ -570,18 +601,32 @@ def apply_watermark_only(
     cmt_text = (f"drawtext=text='Comment your fav moment below\\!'{_FONT_B}:fontsize=32"
                 f":fontcolor=white:borderw=2:bordercolor=black@0.8:x=(w-tw)/2:y=1732:enable='{cmt_en}'")
 
+    if shr_en:
+        shr_box  = f"drawbox=x=160:y=1710:w=760:h=74:color=#116611@0.88:t=fill:enable='{shr_en}'"
+        shr_text = (f"drawtext=text='Share with a cat lover\\!'{_FONT_B}:fontsize=34"
+                    f":fontcolor=white:borderw=2:bordercolor=black@0.8:x=(w-tw)/2:y=1733:enable='{shr_en}'")
+    else:
+        shr_box = shr_text = ""
+
     end_box  = f"drawbox=x=160:y=1718:w=760:h=74:color=#111111@0.90:t=fill:enable='{end_en}'"
     end_text = (f"drawtext=text='SUBSCRIBE FOR MORE'{_FONT_B}:fontsize=36:fontcolor=white"
                 f":borderw=3:bordercolor=#EE1111@0.9:x=(w-tw)/2:y=1735:enable='{end_en}'")
 
+    vf_parts = [
+        scale_filter, wm_filter,
+        popup_box, popup_text, popup_hint,
+        cmt_box, cmt_text,
+    ]
+    if shr_box:
+        vf_parts += [shr_box, shr_text]
+    vf_parts += [end_box, end_text]
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     _ffmpeg(
         "-i", str(source_path),
-        "-vf", (f"{scale_filter},{wm_filter},"
-                f"{popup_box},{popup_text},{popup_hint},"
-                f"{cmt_box},{cmt_text},"
-                f"{end_box},{end_text}"),
-        "-c:v", VIDEO_CODEC, "-crf", VIDEO_CRF, "-preset", "fast",
+        "-map", "0:v:0", "-map", "0:a?",
+        "-vf", ",".join(vf_parts),
+        "-c:v", VIDEO_CODEC, "-crf", VIDEO_CRF, "-preset", "medium",
         "-c:a", "aac", "-b:a", "128k", "-ac", "2",
         "-af", "loudnorm=I=-14:LRA=7:TP=-2",
         "-movflags", "+faststart",

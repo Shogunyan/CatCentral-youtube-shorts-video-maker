@@ -189,7 +189,14 @@ def generate_description(
     intro = random.choice(DESCRIPTION_INTROS)
     cta = random.choice(DESCRIPTION_CTAs)
 
-    body = f"{intro}\n\n{cta}\n{DESCRIPTION_FOOTER}\n\n"
+    # Lead with the video title so YouTube indexes it as the description's top keyword.
+    clean_title = re.sub(r'\s*#\w+', '', title).strip() if title else ""
+    parts = []
+    if clean_title:
+        parts.append(clean_title)
+    parts.append(intro)
+    parts.append(f"{cta}\n{DESCRIPTION_FOOTER}")
+    body = "\n\n".join(parts) + "\n\n"
 
     # Fill remaining description space with hashtags (YouTube limit: 5000 chars).
     # Pinned tags go first (YouTube uses the first 3 as topic tags under the title).
@@ -415,3 +422,58 @@ def generate_copy_caption() -> dict:
         "description": generate_description(title, extra_hashtags=hashtags),
         "tags": generate_tags(hashtags),
     }
+
+
+# ── WebVTT captions & chapter timestamps ─────────────────────────────────────
+
+def _fmt_vtt(ms: float) -> str:
+    """Format milliseconds as HH:MM:SS.mmm for WebVTT."""
+    ms = max(0.0, ms)
+    h = int(ms // 3_600_000); ms -= h * 3_600_000
+    m = int(ms // 60_000);    ms -= m * 60_000
+    s = int(ms // 1_000);     frac = int(ms - s * 1_000)
+    return f"{h:02d}:{m:02d}:{s:02d}.{frac:03d}"
+
+
+def generate_srt(
+    title: str,
+    duration: float,
+    n_clips: int = 5,
+    is_ranking: bool = True,
+) -> str:
+    """
+    Return WebVTT caption content for a cat ranking (or copy) video.
+    Ranking videos get one cue per clip counting down from n_clips to 1.
+    Copy videos get a single cue covering the full duration.
+    """
+    lines = ["WEBVTT", ""]
+    if is_ranking and n_clips > 0 and duration > 0:
+        seg = duration / n_clips
+        for i in range(n_clips):
+            start_ms = i * seg * 1000
+            end_ms   = (i + 1) * seg * 1000
+            rank = n_clips - i
+            lines += [f"{_fmt_vtt(start_ms)} --> {_fmt_vtt(end_ms)}", f"Cat #{rank}", ""]
+    elif duration > 0:
+        clean = re.sub(r'\s*#\w+', '', title).strip() if title else "Cat video"
+        lines += [f"00:00:00.000 --> {_fmt_vtt(duration * 1000)}", clean or "Cat video", ""]
+    return "\n".join(lines)
+
+
+def generate_chapter_timestamps(duration: float, n_clips: int = 5) -> str:
+    """
+    Return YouTube chapter timestamp lines for a ranking video description.
+    Format: '0:00 Cat #5\\n0:06 Cat #4\\n...' — YouTube requires the first
+    chapter at 0:00 and at least 3 chapters total for chapters to activate.
+    """
+    if duration <= 0 or n_clips <= 0:
+        return ""
+    seg = duration / n_clips
+    lines = []
+    for i in range(n_clips):
+        t    = i * seg
+        rank = n_clips - i
+        mm   = int(t // 60)
+        ss   = int(t % 60)
+        lines.append(f"{mm}:{ss:02d} Cat #{rank}")
+    return "\n".join(lines)

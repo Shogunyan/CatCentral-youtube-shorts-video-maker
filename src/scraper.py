@@ -610,6 +610,8 @@ class VideoScraper:
                 "platform":       "full_ranking_short",
                 "title":          rv["title"],
                 "view_count":     rv_views,
+                "duration":       rv_duration,
+                "upload_date":    rv.get("upload_date") or info.get("upload_date") or "",
                 "_full_short":    True,
                 "_rank_segments": [],
             }]
